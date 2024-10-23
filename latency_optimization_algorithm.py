@@ -108,9 +108,11 @@ def simulator(args):
         total_time += args.user_request_gap
 
     total_time += ongoing_request.remaining_computation_time[-1]
+    print('---'*50)
 
     while len(queue.nodes) > 0:
         highest_priority_request_id = queue.get_highest_priority_request_id()
+        highest_priority_request = queue.nodes[highest_priority_request_id]
         highest_priority_request.print_out_features()
         # finish the remaining requests
         total_time += highest_priority_request.remaining_computation_time[-1]
@@ -126,7 +128,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--seed', type=int, default=0)
     parser.add_argument('--user_request_gap', type=float, default=0.5)
-    parser.add_argument('--user_request_num', type=int, default=2)
+    parser.add_argument('--user_request_num', type=int, default=10)
     parser.add_argument('--ranks', type=int, default=10)
     parser.add_argument('--length_bucket_num', type=int, default=20)
     parser.add_argument('--max_prompt_length', type=int, default=20)

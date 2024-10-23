@@ -38,16 +38,19 @@ def simulator(args):
         if ongoing_request.remaining_computation_time[-1] <= 0:
             queue = queue[1:]
             # put the next user request to the GPU
-            ongoing_request_id = ongoing_request_id + 1
-            ongoing_request = queue[0]
-            ongoing_request.update_computation_time_normal_run(args.user_request_gap + ongoing_request.remaining_computation_time[-1])
+            new_ongoing_request = queue[0]
+            new_ongoing_request.update_computation_time_normal_run(args.user_request_gap + ongoing_request.remaining_computation_time[-1])
+            ongoing_request = new_ongoing_request
 
         total_time += args.user_request_gap
 
         print('-'*50)
         print('-'*50)
-        time.sleep(1)
+        time.sleep(0.1)
 
+    print('---'*50)
+    for node in queue:
+        node.print_out_features()
     for user_request in queue:
         total_time += user_request.remaining_computation_time[-1]
 
@@ -58,7 +61,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--seed', type=int, default=0)
     parser.add_argument('--user_request_gap', type=float, default=0.5)
-    parser.add_argument('--user_request_num', type=int, default=2)
+    parser.add_argument('--user_request_num', type=int, default=10)
     parser.add_argument('--ranks', type=int, default=10)
     parser.add_argument('--length_bucket_num', type=int, default=20)
     parser.add_argument('--max_prompt_length', type=int, default=20)

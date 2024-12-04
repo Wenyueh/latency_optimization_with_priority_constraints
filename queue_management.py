@@ -7,9 +7,13 @@ from semantic_predictor import (
     oracle_output_length_bucket_predictor,
     compute_predicted_total_generation_time
 )
+import numpy as np
+import operator
+import argparse
+import random
 
 class Request:
-    def __init__(self, args, user_request_id):
+    def __init__(self, args, user_request_id, computed_priority_value, computed_output_length_value):
         # all methods in the class takes Request object as input
 
         self.args = args
@@ -17,8 +21,8 @@ class Request:
         # properties of the user request
         self.prompt_length = config.user_request_prompt_length[self.user_request_id]
         self.output_length = config.user_request_output_length[self.user_request_id]
-        self.predicted_priority = oracle_priority_predictor(self.user_request_id)
-        self.predicted_output_length = oracle_output_length_bucket_predictor(args, self.user_request_id)
+        self.predicted_priority = computed_priority_value
+        self.predicted_output_length = computed_output_length_value
         # it can have 1 unique parent
         self.parent = None
         # it can have multiple children unordered
@@ -26,7 +30,8 @@ class Request:
         # record finished time and remaining time
         self.finished_computation_time = 0
         self.remaining_computation_time = compute_total_generation_time(args, self.user_request_id)
-        self.predicted_remaining_computation_time = compute_predicted_total_generation_time(args, self.user_request_id)
+        self.predicted_remaining_computation_time = compute_predicted_total_generation_time(args, self.prompt_length, self.output_length)
+        self.waiting_time = 0
 
     def set_parent(self, parent):
         self.parent = parent
@@ -76,28 +81,68 @@ class Request:
         print(f"Finished Computation Time: {self.finished_computation_time}")
         print(f"Remaining Computation Time: {self.remaining_computation_time}")
 
+
 class PriorityQueue:
     def __init__(self, args):
         # all methods in this class take int (user_request_id) 
         # or list of int (pool_of_unordered_nodes) as input
         self.args = args
-        self.root = Request(args, -1)
+        self.root = Request(args, -1, float('inf'), float('inf'))
         self.nodes = {}
 
-    def insert_node(self, user_request_id):
-        node = Request(self.args, user_request_id)
-        self.root.add_child(node)
-        node.parent = self.root
+    # take in a user request object
+    def insert_node(self, user_request):
+        self.nodes[user_request.user_request_id] = user_request
+        self.root.add_child(user_request)
+        user_request.parent = self.root
         
-        self.nodes[node.user_request_id] = node
-
     def remove_node(self, user_request_id):
         self.nodes[user_request_id].parent.children.pop(user_request_id, None)
         for child in self.nodes[user_request_id].children.values():
             child.set_parent(self.nodes[user_request_id].parent)
             self.nodes[user_request_id].parent.add_child(child)
 
+        self.nodes[user_request_id].children = {}
+        self.nodes[user_request_id].parent = None
         self.nodes.pop(user_request_id, None)
+
+    async def compute_first_node(self):
+        root_children = list(self.root.children.values())
+        if len(root_children) == 1:
+            return
+        root_children_indices = list(self.root.children.keys())
+        all_predicted_priority_values = np.array([root_child.predicted_priority for root_child in root_children])
+        highest_priority_children_indices=list(np.where(all_predicted_priority_values==all_predicted_priority_values.min())[0])
+        if len(highest_priority_children_indices) == 1:
+            for root_children_index in root_children_indices:
+                if root_children_index != root_children_indices[highest_priority_children_indices[0]]:
+                    self.add_dependency(root_children_indices[highest_priority_children_indices[0]], root_children_index)
+            return
+        else:
+            highest_priority_children = operator.itemgetter(*highest_priority_children_indices)(root_children)
+            highest_priority_child_index = np.argmin([highest_priority_child.predicted_remaining_computation_time[-1] for highest_priority_child in highest_priority_children])
+            for root_children_index in root_children_indices:
+                if root_children_index != highest_priority_children[highest_priority_child_index].user_request_id:
+                    self.add_dependency(highest_priority_children[highest_priority_child_index].user_request_id, root_children_index)
+            return
+
+    def fetch_next_node(self):
+        assert len(self.root.children) == 1, "Root should have only one child."
+        next_node = list(self.root.children.values())[0]
+        self.remove_node(next_node.user_request_id)
+        return next_node
+    
+    def add_dependency(self, user_request_id_1, user_request_id_2):
+        # a comes before b
+        self.nodes[user_request_id_1].add_child(self.nodes[user_request_id_2])
+        self.nodes[user_request_id_2].parent.children.pop(user_request_id_2, None)
+        self.nodes[user_request_id_2].set_parent(self.nodes[user_request_id_1])
+
+    def update_waiting_time(self, waiting_time):
+        for request_id in self.nodes.keys():
+            self.nodes[request_id].waiting_time += waiting_time
+
+    # ----- until here
     
     def ordering(self, user_request_id_1, user_request_id_2):
         if self.nodes[user_request_id_1].predicted_priority < self.nodes[user_request_id_2].predicted_priority:
@@ -106,16 +151,7 @@ class PriorityQueue:
             return self.nodes[user_request_id_1].predicted_remaining_computation_time[-1] < self.nodes[user_request_id_2].predicted_remaining_computation_time[-1]
         else:
             return False
-
-    def add_dependency(self, user_request_id_1, user_request_id_2):
-        # a comes before b
-        self.nodes[user_request_id_2].parent.children.pop(user_request_id_2)
-        self.nodes[user_request_id_1].add_child(self.nodes[user_request_id_2])
-        self.nodes[user_request_id_2].set_parent(self.nodes[user_request_id_1])
-
-        self.nodes[user_request_id_1] = self.nodes[user_request_id_1]
-        self.nodes[user_request_id_2] = self.nodes[user_request_id_2]
-
+        
     def get_highest_priority_request_id(self):
         # always make sure that the root has only one child
         # which means that we always know what's next to process to GPU
@@ -223,8 +259,73 @@ class PriorityQueue:
     
     def visualize(self, node, level=0):
         # Print the current node with indentation based on its level
-        print(' ' * level * 4 + f"|-- {node.user_request_id}")
+        print(' ' * level * 4 + f"|-- {node.user_request_id} ({node.predicted_priority}, {round(node.predicted_remaining_computation_time[-1], 2)})")
         
         # Recursively print each child at the next level
         for child in node.children.values():
             self.visualize(child, level + 1)
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--seed', type=int, default=0)
+    parser.add_argument('--user_request_gap', type=float, default=0.5)
+    parser.add_argument('--user_request_num', type=int, default=10)
+    parser.add_argument('--ranks', type=int, default=10)
+    parser.add_argument('--length_bucket_num', type=int, default=20)
+    parser.add_argument('--max_prompt_length', type=int, default=20)
+    parser.add_argument('--max_output_length', type=int, default=100)
+
+    parser.add_argument('--token_decoding_speed', type=float, default=0.05)
+    parser.add_argument('--prefill_speed', type=float, default=0.05)
+    parser.add_argument('--cache_loading_speed', type=float, default=0.01, help='cache loading speed per token')
+    parser.add_argument('--cache_saving_speed', type=float, default=0.01, help='cache saving speed per token')
+    args = parser.parse_args()
+
+    def initialize_user_request(args):
+        user_request_priority = [random.choice(list(range(args.ranks))) for _ in range(args.user_request_num)]
+        user_request_prompt_length = [random.choice(list(range(1, args.max_prompt_length))) for _ in range(args.user_request_num)]
+        user_request_output_length = [random.choice(list(range(1, args.max_output_length))) for user_request in user_request_prompt_length]
+        return user_request_priority, user_request_prompt_length, user_request_output_length
+    
+    random.seed(args.seed)
+    np.random.seed(args.seed)
+
+    config.user_request_priority, config.user_request_prompt_length, config.user_request_output_length = initialize_user_request(args)
+
+    queue = PriorityQueue(args)
+    node = Request(args, 0, 3, 2)
+    queue.insert_node(node)
+    node = Request(args, 1, 3, 3)
+    queue.insert_node(node)
+    node = Request(args, 2, 2, 4)
+    queue.insert_node(node)
+    node = Request(args, 3, 4, 5)
+    queue.insert_node(node)
+    node = Request(args, 4, 5, 6)
+    queue.insert_node(node)
+    node = Request(args, 5, 6, 7)
+    queue.insert_node(node)
+
+    queue.add_dependency(0, 1)
+    queue.add_dependency(2, 0)
+    queue.add_dependency(3, 4)
+    queue.add_dependency(3, 5)
+    queue.add_dependency(3, 2)
+
+    # queue.compute_first_node()
+    # queue.fetch_next_node().print_out_features()
+
+    # queue.build_order(list(range(10)))
+    # queue.remove_node(5)
+
+    # for user_request_id in range(10, 20):
+    #     queue.insert_node(user_request_id)
+
+    # print(queue.get_highest_priority_request_id())
+
+    # queue.remove_node(2)
+
+    # print(queue.get_highest_priority_request_id())
+
+    queue.visualize(queue.root)

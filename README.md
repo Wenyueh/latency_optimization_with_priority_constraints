@@ -17,9 +17,5 @@ pip install -r requirements.txt
 
 To run simulation code:
 ```
-user_request_gap = 0.5 # the frequency that new requests come
-user_request_num = 100 # the total number of requests we need to process
-ranks = 10 # the number of ranks in the priority hierarchy
-
-python latency_optimization_algorithm.py --user_request_gap user_request_gap --user_request_num user_request_num --ranks ranks
+python main.py
 ```

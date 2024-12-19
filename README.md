@@ -17,5 +17,6 @@ pip install -r requirements.txt
 
 To run simulation code:
 ```
+cd Dec_18
 python main.py
 ```

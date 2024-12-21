@@ -11,6 +11,8 @@ import numpy as np
 import operator
 import argparse
 import random
+import asyncio
+import heapq
 
 class Request:
     def __init__(self, args, user_request_id, computed_priority_value, computed_output_length_value):
@@ -81,6 +83,24 @@ class Request:
         print(f"Finished Computation Time: {self.finished_computation_time}")
         print(f"Remaining Computation Time: {self.remaining_computation_time}")
 
+class TwoDimensionalPriorityQueue:
+    def __init__(self):
+        self.heap = []
+
+    def push(self, item, priority1, priority2):
+        # Use a tuple (priority1, priority2, item) to maintain the heap property
+        heapq.heappush(self.heap, (priority1, priority2, item))
+
+    def pop(self):
+        # Pop the item with the highest priority (smallest priority1, then smallest priority2)
+        return heapq.heappop(self.heap)[2]
+
+    def peek(self):
+        # Peek at the item with the highest priority without popping it
+        return self.heap[0][2]
+
+    def is_empty(self):
+        return len(self.heap) == 0
 
 class PriorityQueue:
     def __init__(self, args):
@@ -89,60 +109,95 @@ class PriorityQueue:
         self.args = args
         self.root = Request(args, -1, float('inf'), float('inf'))
         self.nodes = {}
+        self.unsorted_nodes = []
+        self.first_unsorted_node_idx = -1
+        self.two_dim_priority_queue = TwoDimensionalPriorityQueue()
 
-    # take in a user request object
-    def insert_node(self, user_request):
-        self.nodes[user_request.user_request_id] = user_request
-        self.root.add_child(user_request)
-        user_request.parent = self.root
-        
-    def remove_node(self, user_request_id):
-        self.nodes[user_request_id].parent.children.pop(user_request_id, None)
-        for child in self.nodes[user_request_id].children.values():
-            child.set_parent(self.nodes[user_request_id].parent)
-            self.nodes[user_request_id].parent.add_child(child)
+    def add_unsorted_node(self, user_request):
+        self.unsorted_nodes.append(user_request)
+        if (self.first_unsorted_node_idx < 0) or \
+            ((user_request.predicted_priority <= self.unsorted_nodes[self.first_unsorted_node_idx].predicted_priority) and
+            (user_request.predicted_remaining_computation_time[-1] <= self.unsorted_nodes[self.first_unsorted_node_idx].predicted_remaining_computation_time[-1])):
+            self.first_unsorted_node_idx = len(self.unsorted_nodes) - 1
 
-        self.nodes[user_request_id].children = {}
-        self.nodes[user_request_id].parent = None
-        self.nodes.pop(user_request_id, None)
+    # # take in a user request object
+    # def insert_node(self, user_request):
+    #     self.nodes[user_request.user_request_id] = user_request
+    #     self.root.add_child(user_request)
+    #     user_request.parent = self.root
+    #
+    # def remove_node(self, user_request_id):
+    #     self.nodes[user_request_id].parent.children.pop(user_request_id, None)
+    #     for child in self.nodes[user_request_id].children.values():
+    #         child.set_parent(self.nodes[user_request_id].parent)
+    #         self.nodes[user_request_id].parent.add_child(child)
+    #
+    #     self.nodes[user_request_id].children = {}
+    #     self.nodes[user_request_id].parent = None
+    #     self.nodes.pop(user_request_id, None)
 
-    async def compute_first_node(self):
-        root_children = list(self.root.children.values())
-        if len(root_children) == 1:
-            return
-        root_children_indices = list(self.root.children.keys())
-        all_predicted_priority_values = np.array([root_child.predicted_priority for root_child in root_children])
-        highest_priority_children_indices=list(np.where(all_predicted_priority_values==all_predicted_priority_values.min())[0])
-        if len(highest_priority_children_indices) == 1:
-            for root_children_index in root_children_indices:
-                if root_children_index != root_children_indices[highest_priority_children_indices[0]]:
-                    self.add_dependency(root_children_indices[highest_priority_children_indices[0]], root_children_index)
-            return
-        else:
-            highest_priority_children = operator.itemgetter(*highest_priority_children_indices)(root_children)
-            highest_priority_child_index = np.argmin([highest_priority_child.predicted_remaining_computation_time[-1] for highest_priority_child in highest_priority_children])
-            for root_children_index in root_children_indices:
-                if root_children_index != highest_priority_children[highest_priority_child_index].user_request_id:
-                    self.add_dependency(highest_priority_children[highest_priority_child_index].user_request_id, root_children_index)
-            return
+    # async def compute_first_node(self):
+    #     # print(bcolors.OKGREEN + "Computing the first node in the queue..." + bcolors.ENDC)
+    #     # await asyncio.sleep(1)
+    #     # print(bcolors.OKGREEN + "First node computed!" + bcolors.ENDC)
+    #     root_children = list(self.root.children.values())
+    #     if len(root_children) == 1:
+    #         return
+    #     root_children_indices = list(self.root.children.keys())
+    #     all_predicted_priority_values = np.array([root_child.predicted_priority for root_child in root_children])
+    #     highest_priority_children_indices=list(np.where(all_predicted_priority_values==all_predicted_priority_values.min())[0])
+    #     if len(highest_priority_children_indices) == 1:
+    #         for root_children_index in root_children_indices:
+    #             if root_children_index != root_children_indices[highest_priority_children_indices[0]]:
+    #                 self.add_dependency(root_children_indices[highest_priority_children_indices[0]], root_children_index)
+    #         return
+    #     else:
+    #         highest_priority_children = operator.itemgetter(*highest_priority_children_indices)(root_children)
+    #         highest_priority_child_index = np.argmin([highest_priority_child.predicted_remaining_computation_time[-1] for highest_priority_child in highest_priority_children])
+    #         for root_children_index in root_children_indices:
+    #             if root_children_index != highest_priority_children[highest_priority_child_index].user_request_id:
+    #                 self.add_dependency(highest_priority_children[highest_priority_child_index].user_request_id, root_children_index)
+    #         return
 
     def fetch_next_node(self):
-        assert len(self.root.children) == 1, "Root should have only one child."
-        next_node = list(self.root.children.values())[0]
-        self.remove_node(next_node.user_request_id)
-        return next_node
+        # assert len(self.root.children) == 1, "Root should have only one child."
+        next_sorted_node = self.two_dim_priority_queue.peek()
+        if len(self.unsorted_nodes) > 0:
+            if self.first_unsorted_node_idx < 0:
+                _copy_unsorted_nodes = self.unsorted_nodes.copy()
+                self.unsorted_nodes = []
+                for unsorted_node in _copy_unsorted_nodes:
+                    self.add_unsorted_node(unsorted_node)
+
+            next_unsorted_node = self.unsorted_nodes[self.first_unsorted_node_idx]
+            if (next_unsorted_node.predicted_priority <= next_sorted_node.predicted_priority) and \
+                (next_unsorted_node.predicted_remaining_computation_time[-1] <= next_sorted_node.predicted_remaining_computation_time[-1]):
+                # lazy delete
+                self.unsorted_nodes[self.first_unsorted_node_idx] = Request(self.args, -1, -1 * float('inf'), float('inf'))
+                self.first_unsorted_node_idx = -1
+                return next_unsorted_node
+
+        self.two_dim_priority_queue.pop()
+        return next_sorted_node
+
+    def incremental_update(self):
+        while len(self.unsorted_nodes) > 0:
+            next_unsorted_node = self.unsorted_nodes.pop(0)
+            self.first_unsorted_node_idx -= 1
+            self.two_dim_priority_queue.push(next_unsorted_node, next_unsorted_node.predicted_priority, next_unsorted_node.predicted_remaining_computation_time[-1])
+
     
-    def add_dependency(self, user_request_id_1, user_request_id_2):
-        # a comes before b
-        self.nodes[user_request_id_1].add_child(self.nodes[user_request_id_2])
-        self.nodes[user_request_id_2].parent.children.pop(user_request_id_2, None)
-        self.nodes[user_request_id_2].set_parent(self.nodes[user_request_id_1])
+    # def add_dependency(self, user_request_id_1, user_request_id_2):
+    #     # a comes before b
+    #     self.nodes[user_request_id_1].add_child(self.nodes[user_request_id_2])
+    #     self.nodes[user_request_id_2].parent.children.pop(user_request_id_2, None)
+    #     self.nodes[user_request_id_2].set_parent(self.nodes[user_request_id_1])
 
     def update_waiting_time(self, waiting_time):
         for request_id in self.nodes.keys():
             self.nodes[request_id].waiting_time += waiting_time
 
-    # ----- until here
+    # ----- useful until here
     
     def ordering(self, user_request_id_1, user_request_id_2):
         if self.nodes[user_request_id_1].predicted_priority < self.nodes[user_request_id_2].predicted_priority:

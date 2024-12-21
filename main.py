@@ -1,4 +1,6 @@
 import argparse
+from time import sleep
+
 import numpy as np
 import random
 import config
@@ -82,6 +84,12 @@ def compute_arrival_time(args, user_requests):
     return waiting_time, arrival_time, time_arrived_requests
 
 
+async def count():
+    print("One")
+    await asyncio.sleep(5)
+    print("Two")
+
+
 async def simulator(args, user_requests):
     user_request_waiting_time_from_predictor, user_request_arrival_time_from_predictor, time_arrived_requests = compute_arrival_time(args, user_requests)     
     
@@ -100,15 +108,21 @@ async def simulator(args, user_requests):
         # if there is no ongoing request
         # in which case the queue is definitely empty
         # we just put the highest priority request to the GPU
+        # START ---------------------------------------------
         if ongoing_request is None:
             # add incoming requests to the queue
             for request_id in arrived_user_request_ids:
                 new_user_request = Request(args, request_id, oracle_predicted_priority[request_id], oracle_predicted_output_length[request_id])
-                full_queue.insert_node(new_user_request)
+                # full_queue.insert_node(new_user_request)
+                full_queue.add_unsorted_node(new_user_request)
             # get the next node to process
-            await full_queue.compute_first_node()
+            # await full_queue.compute_first_node()
+            # await asyncio.gather(*[full_queue.compute_first_node() for _ in range(3)] + [count()])
             # fetch the next node
+            # ongoing_request = full_queue.fetch_next_node()
             ongoing_request = full_queue.fetch_next_node()
+            asyncio.create_task(full_sort)
+            asyncio.create_task(GPU_execute)
         else:
             # build a temp queue
             temp_queue = PriorityQueue(args)
@@ -122,6 +136,7 @@ async def simulator(args, user_requests):
             await temp_queue.compute_first_node()
             # fetch the next node
             next_request_in_batch = temp_queue.fetch_next_node()
+        # END ---------------------------------------------
 
             # preempt the ongoing request by the new request if necessary
             if trigger_preemption(ongoing_request, next_request_in_batch):

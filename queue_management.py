@@ -107,14 +107,15 @@ class PriorityQueue:
         # all methods in this class take int (user_request_id) 
         # or list of int (pool_of_unordered_nodes) as input
         self.args = args
-        self.root = Request(args, -1, float('inf'), float('inf'))
-        self.nodes = {}
+        # self.root = Request(args, -1, float('inf'), float('inf'))
+        # self.nodes = {}
         self.unsorted_nodes = []
         self.first_unsorted_node_idx = -1
         self.two_dim_priority_queue = TwoDimensionalPriorityQueue()
 
     def add_unsorted_node(self, user_request):
         self.unsorted_nodes.append(user_request)
+        # TODO: use the total remaining time of the user requests instead of 'predicted_remaining_computation_time'
         if (self.first_unsorted_node_idx < 0) or \
             ((user_request.predicted_priority <= self.unsorted_nodes[self.first_unsorted_node_idx].predicted_priority) and
             (user_request.predicted_remaining_computation_time[-1] <= self.unsorted_nodes[self.first_unsorted_node_idx].predicted_remaining_computation_time[-1])):
@@ -163,16 +164,18 @@ class PriorityQueue:
         # assert len(self.root.children) == 1, "Root should have only one child."
         next_sorted_node = self.two_dim_priority_queue.peek()
         if len(self.unsorted_nodes) > 0:
+            # re-compute the first unsorted node index if it is not valid
             if self.first_unsorted_node_idx < 0:
                 _copy_unsorted_nodes = self.unsorted_nodes.copy()
                 self.unsorted_nodes = []
                 for unsorted_node in _copy_unsorted_nodes:
                     self.add_unsorted_node(unsorted_node)
 
+            # TODO: use the total remaining time of the user requests instead of 'predicted_remaining_computation_time'
             next_unsorted_node = self.unsorted_nodes[self.first_unsorted_node_idx]
             if (next_unsorted_node.predicted_priority <= next_sorted_node.predicted_priority) and \
                 (next_unsorted_node.predicted_remaining_computation_time[-1] <= next_sorted_node.predicted_remaining_computation_time[-1]):
-                # lazy delete
+                # lazy deletion by replacing the node with a dummy node
                 self.unsorted_nodes[self.first_unsorted_node_idx] = Request(self.args, -1, -1 * float('inf'), float('inf'))
                 self.first_unsorted_node_idx = -1
                 return next_unsorted_node
@@ -181,10 +184,15 @@ class PriorityQueue:
         return next_sorted_node
 
     def incremental_update(self):
+        # TODO: add the 'is_GPU_job_completed' flag to the PriorityQueue class and include it in the following condition to ensure atomic operation
+        # TODO: the 'is_GPU_job_completed' flag should be set to True when the GPU job is completed, and False at the beginning of the next GPU job
         while len(self.unsorted_nodes) > 0:
             next_unsorted_node = self.unsorted_nodes.pop(0)
             self.first_unsorted_node_idx -= 1
-            self.two_dim_priority_queue.push(next_unsorted_node, next_unsorted_node.predicted_priority, next_unsorted_node.predicted_remaining_computation_time[-1])
+            # delete the dummy node
+            # TODO: use the total remaining time of the user requests instead of 'predicted_remaining_computation_time'
+            if next_unsorted_node.predicted_priority > -1 * float('inf'):
+                self.two_dim_priority_queue.push(next_unsorted_node, next_unsorted_node.predicted_priority, next_unsorted_node.predicted_remaining_computation_time[-1])
 
     
     # def add_dependency(self, user_request_id_1, user_request_id_2):

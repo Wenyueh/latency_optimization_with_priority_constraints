@@ -1,5 +1,7 @@
 # latency optimization with priority constraints
 
+## latest code under Dec_23 directory
+
 ## Abstract
 
 In contemporary LLM servers, the efficient scheduling of user requests is paramount for optimizing performance and ensuring timely responses. User requests often arrive with varying priorities, dependencies, and constraints, presenting complex challenges for system designers aiming to minimize latency and maximize resource utilization. This project focuses on developing latency optimization algorithms for user request scheduling under constraints.
@@ -17,6 +19,6 @@ pip install -r requirements.txt
 
 To run simulation code:
 ```
-cd Dec_18
+cd Dec_23
 python main.py
 ```

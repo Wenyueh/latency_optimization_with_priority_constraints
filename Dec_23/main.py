@@ -4,7 +4,7 @@ import random
 import config
 from copy import deepcopy
 from queue_management import Request, PriorityQueue
-from utils import bcolors, cancel, round_2
+from utils import bcolors, cancel, round_2, compute_average_waiting_time
 from semantic_predictor import (
     oracle_priority_predictor, 
     oracle_output_length_bucket_predictor, 
@@ -289,9 +289,8 @@ async def simulator(args, user_requests):
         else:
             await GPU_execute(arrival_time_id, arrival_intervals, full_queue, ongoing_request, record_requests)
 
-
-    for i in range(len(record_requests)):
-        print(f"User request {record_requests[i].user_request_id} has a total waiting time of {record_requests[i].waiting_time}")
+    waiting_time_with_priority = compute_average_waiting_time(record_requests)
+    print(waiting_time_with_priority)
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()

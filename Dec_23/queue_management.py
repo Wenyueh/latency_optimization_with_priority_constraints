@@ -156,7 +156,13 @@ class PriorityQueue:
         self.unsorted_nodes.append(user_request)
         # TODO: use the total remaining time of the user requests instead of 'predicted_remaining_computation_time'
         if self.first_unsorted_node_idx < 0:
-            self.first_unsorted_node_idx = len(self.unsorted_nodes) - 1
+            if len(self.unsorted_nodes) == 1:
+                self.first_unsorted_node_idx = 0
+            else:
+                # max unsorted node has been fetched before adding the new element,
+                # we need to recompute the max unsorted node index from scratch after adding the new element
+                self.find_max_unsorted_node_idx()
+                return
 
         if user_request.predicted_priority < self.unsorted_nodes[self.first_unsorted_node_idx].predicted_priority:
             self.first_unsorted_node_idx = len(self.unsorted_nodes) - 1

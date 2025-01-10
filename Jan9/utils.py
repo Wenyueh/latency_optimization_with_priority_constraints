@@ -78,21 +78,21 @@ def compute_average_waiting_time(args, record_requests):
         with open(file_name, 'w') as f:
             json.dump(save_info, f)
 
-    elif args.length_error_rate >= 0.1:
+    elif args.output_length_error_rate >= 0.1:
         n = 0
-        file_name = f'simulation/length/average_waiting_time_with_priority_lengthrate{args.length_error_rate}_dis{args.length_error_distance}_{n}.json'
+        file_name = f'simulation/length/average_waiting_time_with_priority_lengthrate{args.output_length_error_rate}_dis{args.output_length_error_distance}_{n}.json'
         while os.path.exists(file_name):
             n += 1
-            file_name = f'simulation/length/average_waiting_time_with_priority_lengthrate{args.length_error_rate}_dis{args.length_error_distance}_{n}.json'
+            file_name = f'simulation/length/average_waiting_time_with_priority_lengthrate{args.output_length_error_rate}_dis{args.output_length_error_distance}_{n}.json'
         with open(file_name, 'w') as f:
             json.dump(save_info, f)
 
     else:
         n = 0
-        file_name = f'simulation/latency/average_waiting_time_with_priority_predictorbatch{args.priority_predictor_batching_size}_latency{args.priority_predictor_latency}_{n}.json'
+        file_name = f'simulation/latency/average_waiting_time_with_priority_predictorbatch{args.priority_predictor_batching_size}_latency{args.priority_predictor_latency}_{args.processing_mode}_{n}.json'
         while os.path.exists(file_name):
             n += 1
-            file_name = f'simulation/latency/average_waiting_time_with_priority_predictorbatch{args.priority_predictor_batching_size}_latency{args.priority_predictor_latency}_{n}.json'
+            file_name = f'simulation/latency/average_waiting_time_with_priority_predictorbatch{args.priority_predictor_batching_size}_latency{args.priority_predictor_latency}_{args.processing_mode}_{n}.json'
         with open(file_name, 'w') as f:
             json.dump(save_info, f)
     

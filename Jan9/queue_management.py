@@ -25,7 +25,7 @@ class Request:
         self.output_length = float('inf') if computed_output_length_bucket_value == float('inf') else config.user_request_output_length[self.user_request_id]
         self.priority = float('inf') if computed_priority_value == float('inf') else config.user_request_priority[self.user_request_id]
         self.predicted_priority = float('inf') if computed_priority_value == float('inf') else computed_priority_value
-        self.predicted_output_length = float('inf') if computed_output_length_bucket_value == float('inf') else computed_output_length_bucket_value * (args.max_output_length/args.length_bucket_num)
+        self.predicted_output_length = float('inf') if computed_output_length_bucket_value == float('inf') else max(1, computed_output_length_bucket_value * (args.max_output_length/args.length_bucket_num))
 
         # record finished time and remaining time
         self.finished_computation_time = 0
@@ -99,9 +99,11 @@ class Request:
         self.finished_computation_time = round_2(self.finished_computation_time)
         self.remaining_computation_time = round_2(self.remaining_computation_time)
         self.predicted_remaining_computation_time = round_2(self.predicted_remaining_computation_time)
-        if self.remaining_computation_time[1] == 0:
+
+        # if the predicted time is longer than actually needed, we update the predicted time = 0
+        if self.remaining_computation_time[1] <= 0:
             self.predicted_remaining_computation_time[1] = 0
-        if self.remaining_computation_time[-1] == 0:
+        if self.remaining_computation_time[-1] <= 0:
             self.predicted_remaining_computation_time[-1] = 0
 
     def update_waiting_time(self, waiting_time):
@@ -112,7 +114,9 @@ class Request:
         print(f"Priority: {self.predicted_priority}")
         print(f"Prompt Length: {self.prompt_length}")
         print(f"Output Length: {self.output_length}")
+        print(f"Predicted Output Length: {self.predicted_output_length}")
         print(f"Finished Computation Time: {self.finished_computation_time}")
+        print(f"Predicted Remaining Computation Time: {self.predicted_remaining_computation_time}")
         print(f"Remaining Computation Time: {self.remaining_computation_time}")
 
 # write a heap with two priorities: priority and remaining computation time

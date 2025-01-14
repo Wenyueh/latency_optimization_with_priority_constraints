@@ -46,12 +46,16 @@ def compute_average_waiting_time(args, record_requests):
     save_info = {}
     waiting_time_with_priority = {}
     for i in range(len(record_requests)):
-        save_info[i] = {'user_request_id': record_requests[i].user_request_id, 'waiting_time': record_requests[i].waiting_time, 'priority': record_requests[i].priority, 'predicted_priority': record_requests[i].predicted_priority, 'prompt_length': record_requests[i].prompt_length, 'output_length': record_requests[i].output_length, 'predicted_output_length': record_requests[i].predicted_output_length}
-        print(f"User request {record_requests[i].user_request_id} has a total waiting time of {record_requests[i].waiting_time}")
-        if record_requests[i].priority not in waiting_time_with_priority:
-            waiting_time_with_priority[record_requests[i].priority] = [record_requests[i].waiting_time]
-        else:
-            waiting_time_with_priority[record_requests[i].priority].append(record_requests[i].waiting_time)
+        try:
+            save_info[i] = {'user_request_id': record_requests[i].user_request_id, 'waiting_time': record_requests[i].waiting_time, 'priority': record_requests[i].priority, 'predicted_priority': record_requests[i].predicted_priority, 'prompt_length': record_requests[i].prompt_length, 'output_length': record_requests[i].output_length, 'predicted_output_length': record_requests[i].predicted_output_length}
+            print(f"User request {record_requests[i].user_request_id} has a total waiting time of {record_requests[i].waiting_time}")
+            if record_requests[i].priority not in waiting_time_with_priority:
+                waiting_time_with_priority[record_requests[i].priority] = [record_requests[i].waiting_time]
+            else:
+                waiting_time_with_priority[record_requests[i].priority].append(record_requests[i].waiting_time)
+        except Exception as e:
+            print(f"Error: {e}")
+            continue
     for k,v in waiting_time_with_priority.items():
         print(f"Priority {k} has an average waiting time of {np.mean(v)}")
         waiting_time_with_priority[k] = round_2(np.mean(v))
@@ -66,8 +70,6 @@ def compute_average_waiting_time(args, record_requests):
         while os.path.exists(file_name):
             n += 1
             file_name = f'simulation/gap/average_waiting_time_with_priority_gap{args.user_request_gap}_maxcon{args.max_concurrent_user_requests}_{n}.json'
-        with open(file_name, 'w') as f:
-            json.dump(save_info, f)
 
     elif args.priority_error_rate >= 0.1:
         n = 0
@@ -75,8 +77,6 @@ def compute_average_waiting_time(args, record_requests):
         while os.path.exists(file_name):
             n += 1
             file_name = f'simulation/priority/average_waiting_time_with_priority_priorityrate{args.priority_error_rate}_dis{args.priority_error_distance}_{n}.json'
-        with open(file_name, 'w') as f:
-            json.dump(save_info, f)
 
     elif args.output_length_error_rate >= 0.1:
         n = 0
@@ -84,8 +84,6 @@ def compute_average_waiting_time(args, record_requests):
         while os.path.exists(file_name):
             n += 1
             file_name = f'simulation/length/average_waiting_time_with_priority_lengthrate{args.output_length_error_rate}_dis{args.output_length_error_distance}_{n}.json'
-        with open(file_name, 'w') as f:
-            json.dump(save_info, f)
 
     else:
         n = 0
@@ -93,8 +91,6 @@ def compute_average_waiting_time(args, record_requests):
         while os.path.exists(file_name):
             n += 1
             file_name = f'simulation/latency/average_waiting_time_with_priority_predictorbatch{args.priority_predictor_batching_size}_latency{args.priority_predictor_latency}_{args.processing_mode}_{n}.json'
-        with open(file_name, 'w') as f:
-            json.dump(save_info, f)
     
     
-    return waiting_time_with_priority
+    return save_info, file_name

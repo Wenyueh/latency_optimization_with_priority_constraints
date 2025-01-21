@@ -97,9 +97,13 @@ def compute_generated_tokens(args, prompt_length, output_time):
     output_length = int(max(output_length_possibility_1, output_length_possibility_2))
     return output_length
 def compute_optimal_prefill_length(args, prompt_length):
-    numerator = args.cache_loading_speed - args.prefill_speed_coefficient2 * prompt_length
-    denominator = 2 * args.prefill_speed_coefficient1 * (prompt_length**2)
-    return min(max(0, numerator/denominator), 1)
+    if args.cache_loading_speed * prompt_length > (args.prefill_speed_coefficient1 * prompt_length**2 + args.prefill_speed_coefficient2 * prompt_length):
+        return 1
+    else:
+        return 0
+    # numerator = args.cache_loading_speed - args.prefill_speed_coefficient2 * prompt_length
+    # denominator = 2 * args.prefill_speed_coefficient1 * (prompt_length**2)
+    # return min(max(0, numerator/denominator), 1)
 def compute_optimal_decoding_length(args, prompt_length):
     part1 = args.token_decoding_speed_coefficient1*prompt_length
     part2 = (args.token_decoding_speed_coefficient1 + 2*args.token_decoding_speed_coefficient2)/2
@@ -151,7 +155,7 @@ def update_cache_loading_or_recomputation_time_and_extra_saving_time(args, user_
 
         ######## prefilling update ########
         # compute the time spent on saving the new extra cache
-        prefilling_newly_cache_saving_time = (user_request.optimal_prefill_cache_proportion - user_request.prefill_cache_proportion) * prompt_length * args.cache_saving_speed
+        prefilling_newly_cache_saving_time = max(0, (user_request.optimal_prefill_cache_proportion - user_request.prefill_cache_proportion) * prompt_length * args.cache_saving_speed)
         total_saving_cache_time = round_2(prefilling_newly_cache_saving_time + decoding_cache_saving_time)
         # update prefill cache
         user_request.prefill_cache_loading_time = args.cache_loading_speed * user_request.optimal_prefill_cache_proportion * prompt_length
@@ -186,7 +190,7 @@ def update_cache_loading_or_recomputation_time_and_extra_saving_time(args, user_
         total_saving_cache_time = round_2(prefilling_newly_cache_saving_time)
         # compute the time spent on recompute the prefilling
         recompute_proportion = total_generated_prefill_proportion - should_cache_prefill_proportion
-        prefilling_recompute_time = compute_prefill_time(args, recompute_proportion * prompt_length)
+        prefilling_recompute_time = recompute_proportion * compute_prefill_time(args, prompt_length)
 
         # update running time required
         user_request.finished_computation_time -= prefilling_recompute_time
@@ -252,4 +256,5 @@ if __name__ == '__main__':
     simulated_predicted_output_bucket = simulated_output_length_bucket_predictor(args, list(range(args.user_request_num)), oracle_predicted_output_bucket)
     print(simulated_predicted_priority)
     print(simulated_predicted_output_bucket)
+
 

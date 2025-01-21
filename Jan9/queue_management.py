@@ -162,10 +162,9 @@ class PriorityQueue:
                 # we need to recompute the max unsorted node index from scratch after adding the new element
                 self.find_max_unsorted_node_idx()
                 return
-
+            
         if user_request.predicted_priority < self.unsorted_nodes[self.first_unsorted_node_idx].predicted_priority:
             self.first_unsorted_node_idx = len(self.unsorted_nodes) - 1
-            return
         elif user_request.predicted_priority == self.unsorted_nodes[self.first_unsorted_node_idx].predicted_priority:
             if (user_request.predicted_remaining_computation_time[-1] \
                 + user_request.prefill_cache_loading_time \
@@ -174,7 +173,6 @@ class PriorityQueue:
                 + self.unsorted_nodes[self.first_unsorted_node_idx].prefill_cache_loading_time \
                 + self.unsorted_nodes[self.first_unsorted_node_idx].decoding_cache_loading_time):
                 self.first_unsorted_node_idx = len(self.unsorted_nodes) - 1
-                return
 
     def find_max_unsorted_node_idx(self):
         assert self.first_unsorted_node_idx < 0

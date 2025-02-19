@@ -175,10 +175,10 @@ def update_cache_loading_or_recomputation_time_and_extra_saving_time(args, user_
     elif prefill_time > 0:
         total_generated_prefill_proportion = (compute_prefill_time(args, prompt_length)-prefill_time)/compute_prefill_time(args, prompt_length)
         
-        user_request.prefill_cache_proportion = 0
+        user_request.prefill_cache_proportion = total_generated_prefill_proportion
         user_request.prefill_cache_loading_time = 0
         if set(list(user_request.prefill_cache_position.keys())) != set(list(range(user_request.prompt_length))):
-            user_request.prefill_cache_position = args.KV_block.insert({user_request.user_request_id: list(range(user_request.prompt_length))})
+            user_request.prefill_cache_position = args.MaxHeap_Memory.insert({user_request.user_request_id: list(range(user_request.prompt_length))})
         
         user_request.remaining_computation_time = round_2(user_request.remaining_computation_time)
         user_request.predicted_remaining_computation_time = round_2(user_request.predicted_remaining_computation_time)
@@ -236,4 +236,5 @@ if __name__ == '__main__':
     simulated_predicted_output_bucket = simulated_output_length_bucket_predictor(args, list(range(args.user_request_num)), oracle_predicted_output_bucket)
     print(simulated_predicted_priority)
     print(simulated_predicted_output_bucket)
+
 

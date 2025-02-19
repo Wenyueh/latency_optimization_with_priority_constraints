@@ -26,38 +26,32 @@ def initialize_user_request(args):
 # if user_request_2 cannot preempt any running requests, then no triggering
 # if user_request_2 can preempt the highest priority request, then preempt from the lowest
 # if user_request_2 can preempt any non-highest priority request, we need to check whether it's prefilling and any higher priority request is decoding
-def trigger_preemption(args, ongoing_requests, next_batch):
+def trigger_preemption(args, full_queue, ongoing_requests, next_batch):
+    next_node = full_queue.fetch_next_node()
+    ######### find whether we should do prefilling or decoding in preemption #########
+    ######################################################
+    # compare next_node & current highest_priority node
+    if next_node.predicted_priority < config.ongoing_requests[0].predicted_priority or (next_node.predicted_priority == config.ongoing_requests[0].predicted_priority and next_node.predicted_remaining_computation_time[-1] < config.ongoing_requests[0].predicted_remaining_computation_time[-1]):
+        node_to_align = next_node
+    else:
+        node_to_align = config.ongoing_requests[0]
+    require_decode = False
+    max_prefilling_time = float('inf')
+    if node_to_align.predicted_remaining_computation_time[0] == 0:
+        require_decode = True 
+    else:
+        max_prefilling_time = node_to_align.predicted_remaining_computation_time[0]
+    full_queue.push(next_node, next_node.predicted_priority, next_node.predicted_remaining_computation_time[-1] + next_node.prefill_cache_loading_time + next_node.decoding_cache_loading_time)
+    ######################################################
+    
+    # fetch the highest ordered request in the newly incoming batch of requests
+    # return a sorted list
+    next_batch = full_queue.fetch_next_k_nodes(args.batch_size, require_decode=require_decode, max_prefilling_time=max_prefilling_time)
+
     # for each pair of user requests
     # user_request_1 is the ongoing request
     # user_request_2 is the next request that can preempt user_request_1
-    # def can_preempt_one_by_one(args, user_request_1, user_request_2):
-    #     if user_request_1.predicted_priority > user_request_2.predicted_priority:
-    #         return True 
-    #     elif user_request_1.predicted_priority < user_request_2.predicted_priority:
-    #         return False
-    #     elif user_request_1.predicted_priority == user_request_2.predicted_priority:
-    #         # copy the user_request_1 object
-    #         user_request_1_copy = deepcopy(user_request_1)
-    #         # add loading_cache/recomputation time to total remaining time of the preempted request
-    #         user_request_1_copy_save_time = update_cache_loading_or_recomputation_time_and_extra_saving_time(args, user_request_1_copy)
 
-    #         # if preempting: first user_request_2, then user_request_1
-    #         preempting_time_user_request_2 = user_request_1_copy_save_time + user_request_2.prefill_cache_loading_time + user_request_2.decoding_cache_loading_time + user_request_2.predicted_remaining_computation_time[-1]
-    #         preempting_time_user_request_1_copy = user_request_1_copy.prefill_cache_loading_time + user_request_1_copy.decoding_cache_loading_time + user_request_1_copy.predicted_remaining_computation_time[-1]
-    #         preempting_total_waiting_time = 2*preempting_time_user_request_2 + preempting_time_user_request_1_copy
-            
-    #         # if not preempting: first user_request_1, then user_request_2
-    #         left_prefill_loading_time = (user_request_1.prefill_cache_proportion-user_request_1.prefill_cache_loaded_proportion) * user_request_1.prefill_cache_loading_time
-    #         left_decoding_loading_time = (user_request_1.decoding_cache_length-user_request_1.decoding_cache_loaded_length) * args.cache_loading_speed
-    #         no_preempting_time_user_request_1 = left_prefill_loading_time + left_decoding_loading_time + user_request_1.predicted_remaining_computation_time[-1]
-    #         no_preempting_time_user_request_2 = user_request_2.prefill_cache_loading_time + user_request_2.decoding_cache_loading_time + user_request_2.predicted_remaining_computation_time[-1]
-    #         no_preempting_total_waiting_time = 2*no_preempting_time_user_request_1 + no_preempting_time_user_request_2
-
-    #         if preempting_total_waiting_time < no_preempting_total_waiting_time:
-    #             return True
-    #         else:
-    #             return False
-    
     def merge(list1, list2):
         # merge two list of user requests based on (predicted_priority, predicted_remaining_computation_time)
         pq = []
@@ -77,70 +71,10 @@ def trigger_preemption(args, ongoing_requests, next_batch):
 
     merged_queue = merge(ongoing_requests, next_batch)
     top_batch_size_requests = merged_queue[:args.batch_size]
-    preempted_requests = [i for i in range(len(ongoing_requests)) if ongoing_requests.user_request_id not in [r.user_request_id for r in top_batch_size_requests]]
+    preempted_requests = [i for i in range(len(ongoing_requests)) if ongoing_requests[i].user_request_id not in [r.user_request_id for r in top_batch_size_requests]]
+    push_back_requests = [i for i in range(len(merged_queue)) if merged_queue[i].user_request_id not in [r.user_request_id for r in top_batch_size_requests]]
 
-    return top_batch_size_requests, preempted_requests
-
-
-    # merge two list with three priorities
-    # if the current top is prefill: prefilling time as short as possible, semantic priority, remaining time
-    # if the current top is decoding: decode required, semantic priority, remaining time
-
-    # preempt_pair = []
-    # # if currently running requests are in decoding stage, and all newly incoming requests need prefilling first
-    # # then we need to check whether we can preempt all the running requests
-    # if not still_prefill:
-    #     # if the highest order request in next_batch need to do prefilling
-    #     # then we need to check whether it can preempt all the running requests
-    #     # if it can preempt, then we can check all other requests whether to preempt or not
-    #     if next_batch[0].predicted_remaining_computation_time[0] > 0:
-    #         can_preempt = True
-    #         for i in range(len(ongoing_requests)):
-    #             if not can_preempt_one_by_one(args, ongoing_requests[i], next_batch[0]):
-    #                 can_preempt = False
-    #                 break
-    #         # if the highest ordered request in next_batch's scheduling order is higher than all ongoing requests
-    #         # then we can preempt all the running requests to do prefilling for it
-    #         if can_preempt:
-    #             last_prefilling_time = next_batch[0].predicted_remaining_computation_time[0]
-    #             preempt_pair.append((ongoing_requests[-1], next_batch[0]))
-    #             for i in range(1, len(next_batch)):
-    #                 ### take the max_prefilling_time into account, don't drag the latency of the highest-CPU-priority request
-    #                 if can_preempt_one_by_one(args, ongoing_requests[-i-1], next_batch[i]) and next_batch[i].predicted_remaining_computation_time[0] <= last_prefilling_time:
-    #                     preempt_pair.append((ongoing_requests[-i-1], next_batch[i]))
-    #                     last_prefilling_time = next_batch[i].predicted_remaining_computation_time[0]
-    #         else:
-    #             for i in range(len(next_batch)):
-    #                 # preemption is only allowed when the request is in decoding stage
-    #                 if next_batch[i].predicted_remaining_computation_time[0] == 0:
-    #                     if can_preempt_one_by_one(args, ongoing_requests[-i-1], next_batch[i]):
-    #                         preempt_pair.append((ongoing_requests[-i-1], next_batch[i]))
-    #     # if the highest ordered request in next_batch is also in decoding stage
-    #     # then we can preempt as many as possible as long as they are in decoding stage
-    #     for i in range(len(next_batch)):
-    #         if next_batch[i].predicted_remaining_computation_time[0] == 0:
-    #             if can_preempt_one_by_one(args, ongoing_requests[-i], next_batch[i]):
-    #                 preempt_pair.append((ongoing_requests[-i], next_batch[i]))
-    # # if the current running requests are in prefilling stage
-    # if still_prefill:
-    #     prefilling_requests = [i for i, r in enumerate(ongoing_requests) if r.predicted_remaining_computation_time[0]> 0]
-    #     if next_batch[0].predicted_remaining_computation_time[0] > 0:
-    #         can_preempt = True
-    #         if can_preempt_one_by_one(args, ongoing_requests[-1], next_batch[0]):
-    #             # if the prefilling time is shorter than the max prefilling time of the ongoing requests, then preempt
-    #             if next_batch[0].predicted_remaining_computation_time[0] > max([ongoing_requests[i].predicted_remaining_computation_time[0] for i in prefilling_requests]):
-    #                 for ongoing_request_id in prefilling_requests:
-    #                     if not can_preempt_one_by_one(args, ongoing_requests[ongoing_request_id], next_batch[0]):
-    #                         can_preempt = False
-    #                 if can_preempt:
-    #                     preempt_pair.append((ongoing_requests[-1], next_batch[0]))
-    #         if can_preempt:
-    #             for i in range(1, len(next_batch)):
-    #                 if next_batch[i].predicted_remaining_computation_time[0] > 0:
-    #                     if can_preempt_one_by_one(args, ongoing_requests[-i-1], next_batch[i]) and next_batch[i].predicted_remaining_computation_time[0] < next_batch[0].predicted_remaining_computation_time[0]:
-    #                         preempt_pair.append((ongoing_requests[-i-1], next_batch[i]))
-
-    # # [(being preempted, new request)]
+    return top_batch_size_requests, preempted_requests, push_back_requests
 
 async def GPU_execute(arrival_time_id, arrival_intervals, full_queue, ongoing_request, record_requests):
     config.ongoing_request = ongoing_request
@@ -306,29 +240,8 @@ async def simulator(args, user_requests):
         if len(config.ongoing_requests) == 0:
             config.ongoing_requests = full_queue.fetch_next_k_nodes(args.batch_size)
         else:
-            next_node = full_queue.fetch_next_node()
-            ######### find whether we should do prefilling or decoding in preemption #########
-            ######################################################
-            # compare next_node & current highest_priority node
-            if next_node.predicted_priority < config.ongoing_requests[0].predicted_priority or (next_node.predicted_priority == config.ongoing_requests[0].predicted_priority and next_node.predicted_remaining_computation_time[-1] < config.ongoing_requests[0].predicted_remaining_computation_time[-1]):
-                node_to_align = next_node
-            else:
-                node_to_align = config.ongoing_requests[0]
-            require_decode = False
-            max_prefilling_time = float('inf')
-            if node_to_align.predicted_remaining_computation_time[0] == 0:
-                require_decode = True 
-            else:
-                max_prefilling_time = node_to_align.predicted_remaining_computation_time[0]
-            full_queue.push(next_node, next_node.predicted_priority, next_node.predicted_remaining_computation_time[-1] + next_node.prefill_cache_loading_time + next_node.decoding_cache_loading_time)
-            ######################################################
-            
-            # fetch the highest ordered request in the newly incoming batch of requests
-            # return a sorted list
-            next_batch = full_queue.fetch_next_k_nodes(args.batch_size, require_decode=require_decode, max_prefilling_time=max_prefilling_time)
-
             # preempt the ongoing request by the new request if necessary
-            ongoing_requests, preempted_requests = trigger_preemption(args, config.ongoing_requests, next_batch)
+            ongoing_requests, preempted_requests, push_back_requests = trigger_preemption(args, full_queue, config.ongoing_requests, next_batch)
             if preempted_requests != []:
                 for preempted_request in preempted_requests:
                     print(bcolors.WARNING + f"Preempting {preempted_request.user_request_id}" + bcolors.ENDC)
@@ -339,9 +252,7 @@ async def simulator(args, user_requests):
                 
                 # always have space for higher priority request
                 for preempted_request in preempted_requests:
-                    cache_processing_time = update_cache_loading_or_recomputation_time_and_extra_saving_time(args, preempted_request)
-                    # put the preempted request back to the queue
-                    full_queue.two_dim_priority_queue.push(preempted_request, preempted_request.predicted_priority, preempted_request.predicted_remaining_computation_time[-1] + preempted_request.prefill_cache_loading_time + preempted_request.decoding_cache_loading_time)
+                    cache_processing_time = update_cache_loading_or_recomputation_time_and_extra_saving_time(args, preempted_request)                    
 
                 # we also consider the situation where the previous saving time is not 0
                 # meaning that the request before the preempted request has not finished saving the cache
@@ -351,9 +262,9 @@ async def simulator(args, user_requests):
                 full_queue.visualize()
             else:
                 print(bcolors.WARNING + "No preemption" + bcolors.ENDC)
-                # add next_request_in_batch in queue right after the root
-                for user_request in next_batch:
-                    full_queue.two_dim_priority_queue.push(user_request, user_request.predicted_priority, user_request.predicted_remaining_computation_time[-1] + user_request.prefill_cache_loading_time + user_request.decoding_cache_loading_time)
+            # put the preempted request back to the queue
+            for user_request in push_back_requests:
+                full_queue.two_dim_priority_queue.push(user_request, user_request.predicted_priority, user_request.predicted_remaining_computation_time[-1] + user_request.prefill_cache_loading_time + user_request.decoding_cache_loading_time)
         
         if arrival_time_id < len(arrival_intervals) - 1:
             running_time = round_2(arrival_intervals[arrival_time_id+1] - arrival_intervals[arrival_time_id])

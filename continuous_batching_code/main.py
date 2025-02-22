@@ -185,7 +185,7 @@ async def GPU_execute(full_queue):
 
             await asyncio.sleep(iteration_time/10)
         
-        has_requests = asyncio.run(detect_requests_coming(full_queue))
+        has_requests = await detect_requests_coming(full_queue)
 
 
 if __name__ == '__main__':

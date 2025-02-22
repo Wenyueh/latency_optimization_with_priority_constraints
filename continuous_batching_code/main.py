@@ -9,7 +9,6 @@ from semantic_predictor import (
     oracle_output_length_bucket_predictor, 
     simulated_priority_predictor, 
     simulated_output_length_bucket_predictor,
-    update_cache_loading_or_recomputation_time_and_extra_saving_time, 
     compute_output_time
 )
 from memory_management import MaxHeap_Memory_Class, compute_GPU_KV_storage_size
@@ -28,10 +27,44 @@ def initialize_user_request(args):
 # if user_request_2 can preempt the highest priority request, then preempt from the lowest
 # if user_request_2 can preempt any non-highest priority request, we need to check whether it's prefilling and any higher priority request is decoding
 
+async def simulator(args, user_requests):
+    user_request_waiting_time_from_predictor, user_request_arrival_time_from_predictor, time_arrived_requests = compute_arrival_time(args, user_requests)     
 
-def GPU_execute(arrival_time_id, arrival_intervals, full_queue, record_requests):
+    print('requests arrive at specific timestamp:', time_arrived_requests)
+
+    oracle_predicted_priority = oracle_priority_predictor(args, list(range(args.user_request_num)))
+    oracle_predicted_output_bucket = oracle_output_length_bucket_predictor(args, list(range(args.user_request_num)))
+    simulated_predicted_priority = simulated_priority_predictor(args, oracle_predicted_priority)
+    simulated_output_length_bucket = simulated_output_length_bucket_predictor(args, oracle_predicted_output_bucket)
+    # Create the priority queue for user request queue management
+    full_queue = PriorityQueue(args)
+    config.record_requests = {}
+
+    config.ongoing_requests = []
+    asyncio.create_task(simulate_incoming_requests(args, full_queue, simulated_predicted_priority, simulated_output_length_bucket))
+    asyncio.create_task(GPU_execute(full_queue))
+    
+    save_info, file_name = compute_average_waiting_time(args, config.record_requests, user_request_waiting_time_from_predictor)
+    
+    return save_info, file_name
+
+async def simulate_incoming_requests(args, full_queue, simulated_predicted_priority, simulated_output_length_bucket):
+    for arrival_time_id, arrived_user_request_ids in enumerate(list(time_arrived_requests.values())):
+        gap_time = list(time_arrived_requests.keys())[arrival_time_id] - list(time_arrived_requests.keys())[arrival_time_id-1] if arrival_time_id != 0 else list(time_arrived_requests.keys())[arrival_time_id]
+        # add incoming requests to the queue
+        # and get the next node to process --> max operation
+        for user_request_id in arrived_user_request_ids:
+            user_request = Request(args, user_request_id, simulated_predicted_priority[user_request_id], simulated_output_length_bucket[user_request_id])
+            full_queue.add_unsorted_node(user_request)
+
+        asyncio.create_task(full_queue.incremental_update(), name=f'incremental_update_task_{arrival_time_id}')
+
+        await asyncio.sleep(gap_time/10)
+
+async def GPU_execute(full_queue):
     def one_execute_iteration(ongoing_requests):
         prefilling_requests = []
+        # check whether there's prefilling requests in the batch
         for user_request in ongoing_requests:
             if user_request.predicted_remaining_computation_time[0] > 0:
                 prefilling_requests.append(request)
@@ -101,84 +134,59 @@ def GPU_execute(arrival_time_id, arrival_intervals, full_queue, record_requests)
         preempted_requests = [i for i in range(len(ongoing_requests)) if ongoing_requests[i].user_request_id not in [r.user_request_id for r in top_batch_size_requests]]
         push_back_requests = [i for i in range(len(merged_queue)) if merged_queue[i].user_request_id not in [r.user_request_id for r in top_batch_size_requests]]
 
+        #!! request memory block, swap together or delete (deleted requests)
+        # allocate before computing the iteration
+        # we have max bandwidth size, might need sequential but unlikely
+        # if requests memory belongs to ongoing batch, remove it from batch
+        # Dujian
+
+        #!! update other requests' remaining computation time due to deletion or swapping
+        # remaining time = CPU loading time + recomputation time + original remaining time
+        # Wenyue
+
         return top_batch_size_requests, preempted_requests, push_back_requests
-
-    # if there're still new requests coming, then we have a fixed running time for this interval
-    if arrival_time_id < len(arrival_intervals) - 1:
-        running_time_for_this_interval = round_2(arrival_intervals[arrival_time_id+1] - arrival_intervals[arrival_time_id])
-        accumulated_running_time = 0
-        while accumulated_running_time <= running_time_for_this_interval and len(config.ongoing_requests) != 0:
-            current_batch_size = len(config.ongoing_requests)
-            # keep running the current batch of requests 
-            # until some requests are done
-            while len(config.ongoing_requests) == current_batch_size:
-                iteration_time, config.ongoing_requests = one_execute_iteration(config.ongoing_requests)
-                full_queue.update_waiting_time(iteration_time)
-                time.sleep(iteration_time/10)
-            # if some requests are done
-            # we need to call the scheduler to get next requests to fill up the batch
-            config.ongoing_requests, preempted_requests, push_back_requests = call_scheduler(args, full_queue, config.ongoing_requests)
-            # update preempted requests' time
-            for preempted_request in preempted_requests:
-                cache_processing_time = update_cache_loading_or_recomputation_time_and_extra_saving_time(args, preempted_request)                    
-            # put the un-running requests back to the queue
-            for user_request in push_back_requests:
-                full_queue.two_dim_priority_queue.push(user_request, user_request.predicted_priority, user_request.predicted_remaining_computation_time[-1] + user_request.prefill_cache_loading_time + user_request.decoding_cache_loading_time)
-            accumulated_running_time += iteration_time
-            if len(config.ongoing_requests) == 0:
-                time.sleep((running_time_for_this_interval - accumulated_running_time)/10)
-    else:
-        # if there're no more requests coming
-        # we just keep running the current batch of requests
-        while len(config.ongoing_requests) != 0:
-            current_batch_size = len(config.ongoing_requests)
-            while len(config.ongoing_requests) == current_batch_size:
-                iteration_time, config.ongoing_requests = one_execute_iteration(config.ongoing_requests)
-                full_queue.update_waiting_time(iteration_time)
-                time.sleep(iteration_time/10)
-            config.ongoing_requests, preempted_requests, push_back_requests = call_scheduler(args, full_queue, config.ongoing_requests)
-            for preempted_request in preempted_requests:
-                cache_processing_time = update_cache_loading_or_recomputation_time_and_extra_saving_time(args, preempted_request)
-            for user_request in push_back_requests:
-                full_queue.two_dim_priority_queue.push(user_request, user_request.predicted_priority, user_request.predicted_remaining_computation_time[-1] + user_request.prefill_cache_loading_time + user_request.decoding_cache_loading_time)
-
-async def simulator(args, user_requests):
-    user_request_waiting_time_from_predictor, user_request_arrival_time_from_predictor, time_arrived_requests = compute_arrival_time(args, user_requests)     
-
-    print('requests arrive at specific timestamp:', time_arrived_requests)
-
-    arrival_intervals = list(time_arrived_requests.keys())
-    oracle_predicted_priority = oracle_priority_predictor(args, list(range(args.user_request_num)))
-    oracle_predicted_output_bucket = oracle_output_length_bucket_predictor(args, list(range(args.user_request_num)))
-    simulated_predicted_priority = simulated_priority_predictor(args, oracle_predicted_priority)
-    simulated_output_length_bucket = simulated_output_length_bucket_predictor(args, oracle_predicted_output_bucket)
-    # Create the priority queue for user request queue management
-    full_queue = PriorityQueue(args)
-    config.record_requests = {}
-
-    config.ongoing_requests = []
-    for arrival_time_id, arrived_user_request_ids in enumerate(list(time_arrived_requests.values())):
-        # add incoming requests to the queue
-        # and get the next node to process --> max operation
-        for user_request_id in arrived_user_request_ids:
-            user_request = Request(args, user_request_id, simulated_predicted_priority[user_request_id], simulated_output_length_bucket[user_request_id])
-            full_queue.add_unsorted_node(user_request)
-
-        asyncio.create_task(full_queue.incremental_update(), name=f'incremental_update_task_{arrival_time_id}')
-
-        if len(config.ongoing_requests) == 0:
-            config.ongoing_requests = full_queue.fetch_next_k_nodes(args.batch_size)
-
-        if arrival_time_id < len(arrival_intervals) - 1:
-            running_time = round_2(arrival_intervals[arrival_time_id+1] - arrival_intervals[arrival_time_id])
-            asyncio.create_task(GPU_execute(arrival_time_id, arrival_intervals, full_queue, config.record_requests), name=f'GPU_execute_task_{config.ongoing_request.user_request_id}')
-            await asyncio.sleep(running_time/10)
-        else:
-            await GPU_execute(arrival_time_id, arrival_intervals, full_queue, config.record_requests)
-
-    save_info, file_name = compute_average_waiting_time(args, config.record_requests, user_request_waiting_time_from_predictor)
     
-    return save_info, file_name
+    # when there's super long gap between next incoming batch of requests
+    # we wait maximum 20 seconds
+    # if no requests coming, we stop the simulation
+    async def detect_requests_coming(full_queue):
+        max_wait_in_simulation = 2000
+        n = 0
+        while len(full_queue.two_dim_priority_queue) == 0 and len(config.ongoing_requests) == 0 and len(full_queue.unsorted_nodes) == 0:
+            await asyncio.sleep(0.01)
+            n += 1
+            if n > max_wait_in_simulation:
+                return False
+        return True
+
+    has_requests = True
+    while has_requests:
+        if len(config.ongoing_requests) == 0:
+            config.ongoing_requests = full_queue.fetch_next_k_nodes(args.batch_size, require_decode=False, max_prefilling_time=float('inf'))
+        while len(full_queue.two_dim_priority_queue) != 0 or len(config.ongoing_requests) != 0 or len(full_queue.unsorted_nodes) != 0:
+            # run one iteration
+            iteration_time, config.ongoing_requests = one_execute_iteration(config.ongoing_requests)
+            # check scheduler
+            config.ongoing_requests, preempted_requests, push_back_requests = call_scheduler(args, full_queue, config.ongoing_requests)
+            # update remaining computation time
+            for request in config.ongoing_requests:
+                request.update_computation_time_normal_run(iteration_time)
+                # just for record to compute final result
+                config.record_requests[request.user_request_id] = request
+            # update waiting time for all requests
+            full_queue.update_waiting_time(iteration_time)
+
+            # put back the push back requests
+            for user_request in push_back_requests:
+                full_queue.two_dim_priority_queue.push(user_request, user_request.predicted_priority, user_request.predicted_remaining_computation_time[-1] + user_request.prefill_cache_loading_time + user_request.decoding_cache_loading_time)
+            completed_requests = [r for r in config.ongoing_requests if r.remaining_computation_time[-1] == 0]
+            #!! delete completed requests' memory block
+            # Dujian
+
+            await asyncio.sleep(iteration_time/10)
+        
+        has_requests = asyncio.run(detect_requests_coming(full_queue))
+
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -295,11 +303,6 @@ if __name__ == '__main__':
 
     # print(queue.get_highest_priority_request_id())
 
-    # queue.visualize(queue.root)
-
-    # waiting_time, arrival_time = compute_arrival_time(args)
-    # print(waiting_time)
-    # print(arrival_time)
     # queue.visualize(queue.root)
 
     # waiting_time, arrival_time = compute_arrival_time(args)

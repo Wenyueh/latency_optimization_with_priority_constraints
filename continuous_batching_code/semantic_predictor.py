@@ -87,7 +87,7 @@ def compute_output_time(args, prompt_length, output_length):
 # prompt_length ^ 2 * prefill_speed + constant (the constant comes from the feedforward network)
 def compute_prefill_time(args, prompt_length):
     p = prompt_length
-    return round_2((p ** 2)*args.prefill_speed_coefficient1 + p*args.prefill_speed_coefficient2)
+    return round_2((p ** 2)*args.prefill_speed_coefficient1 + args.prefill_speed_coefficient2)
 
 # given computation length, how many tokens are computed
 def compute_generated_tokens(args, prompt_length, output_time):
@@ -127,63 +127,64 @@ def compute_predicted_total_generation_time(args, user_request):
     total_generation_time = prefill_time + output_time
     return round_2([prefill_time, output_time, total_generation_time])
 
-# this is only called after the user request is preempted
-#!! if the whole GPU can't take the user request cache ... 
-def update_cache_loading_or_recomputation_time_and_extra_saving_time(args, user_request):
-    finished_computation_time = user_request.finished_computation_time
-    # next time, need to reload the cache
-    user_request.prefill_cache_loaded_proportion = 0
-    user_request.decoding_cache_loaded_length = 0
+# # this is only called after the user request is preempted
+# #!! if the whole GPU can't take the user request cache ... 
+# def update_cache_loading_or_recomputation_time_and_extra_saving_time(args, user_request):
+#     finished_computation_time = user_request.finished_computation_time
+#     # next time, need to reload the cache
+#     user_request.prefill_cache_loaded_proportion = 0
+#     user_request.decoding_cache_loaded_length = 0
 
-    prompt_length = user_request.prompt_length
-    prefill_time, _, _ = user_request.remaining_computation_time
+#     prompt_length = user_request.prompt_length
+#     prefill_time, _, _ = user_request.remaining_computation_time
 
-    # finish prefilling and now in decoding phase
-    if prefill_time <= 0:
-        ######## prefilling update ########
-        KV_dict = {user_request.user_request_id: list(range(user_request.prompt_length))}
-        # if not enough space, then remove old cache
-        # then insert the new cache
-        if args.MaxHeap_Memory.storage_left() < len(KV_dict):
-            # update cache storage, remove overflowing cache
-            #!! remove the old cache, update remaining computation time by compute to swap or discard&recomputation time
-            pass
-        # record the position where the cache is saved
-        user_request.prefill_cache_position = args.MaxHeap_Memory.insert(KV_dict)
-        # update the time and proportion of cache saved in GPU
-        user_request.prefill_cache_proportion = 1
-        user_request.prefill_cache_loading_time = 0
-        ######## decoding update ########
-        total_generated_tokens = compute_generated_tokens(args, prompt_length, finished_computation_time-compute_prefill_time(args, prompt_length))
-        decoding_newly_saving_cache_length = total_generated_tokens - user_request.decoding_cache_length
-        KV_dict = {user_request.user_request_id: list(range(user_request.decoding_cache_length+user_request.prompt_length, len(total_generated_tokens)+user_request.prompt_length))}
-        # if enough space: directly insert the new cache
-        # if not enough space, then remove old cache
-        if decoding_newly_saving_cache_length < args.MaxHeap_Memory.storage_left():
-            #!! remove the old cache
-            pass
-        # then insert the new cache, record the position where the cache is saved
-        user_request.decoding_cache_position = args.MaxHeap_Memory.insert(KV_dict)
-        user_request.decoding_cache_length = total_generated_tokens
-        user_request.decoding_cache_loading_time = 0
+#     # finish prefilling and now in decoding phase
+#     if prefill_time <= 0:
+#         ######## prefilling update ########
+#         KV_dict = {user_request.user_request_id: list(range(user_request.prompt_length))}
+#         # if not enough space, then remove old cache
+#         # then insert the new cache
+#         if args.MaxHeap_Memory.storage_left() < len(KV_dict):
+#             # update cache storage, remove overflowing cache
+#             #!! remove the old cache, update remaining computation time by compute to swap or discard&recomputation time
+#             pass
+#         # record the position where the cache is saved
+#         user_request.prefill_cache_position = args.MaxHeap_Memory.insert(KV_dict)
+#         # update the time and proportion of cache saved in GPU
+#         user_request.prefill_cache_proportion = 1
+#         user_request.prefill_cache_loading_time = 0
+#         ######## decoding update ########
+#         total_generated_tokens = compute_generated_tokens(args, prompt_length, finished_computation_time-compute_prefill_time(args, prompt_length))
+#         decoding_newly_saving_cache_length = total_generated_tokens - user_request.decoding_cache_length
+#         KV_dict = {user_request.user_request_id: list(range(user_request.decoding_cache_length+user_request.prompt_length, len(total_generated_tokens)+user_request.prompt_length))}
+#         # if enough space: directly insert the new cache
+#         # if not enough space, then remove old cache
+#         if decoding_newly_saving_cache_length < args.MaxHeap_Memory.storage_left():
+#             #!! remove the old cache
+#             pass
+#         # then insert the new cache, record the position where the cache is saved
+#         user_request.decoding_cache_position = args.MaxHeap_Memory.insert(KV_dict)
+#         user_request.decoding_cache_length = total_generated_tokens
+#         user_request.decoding_cache_loading_time = 0
 
-        # update running time required
-        user_request.remaining_computation_time = round_2(user_request.remaining_computation_time)
-        user_request.predicted_remaining_computation_time = round_2(user_request.predicted_remaining_computation_time)
+#         # update running time required
+#         user_request.remaining_computation_time = round_2(user_request.remaining_computation_time)
+#         user_request.predicted_remaining_computation_time = round_2(user_request.predicted_remaining_computation_time)
     
-    # still in prefilling phase
-    elif prefill_time > 0:
-        total_generated_prefill_proportion = (compute_prefill_time(args, prompt_length)-prefill_time)/compute_prefill_time(args, prompt_length)
+#     # still in prefilling phase
+#     elif prefill_time > 0:
+#         total_generated_prefill_proportion = (compute_prefill_time(args, prompt_length)-prefill_time)/compute_prefill_time(args, prompt_length)
         
-        user_request.prefill_cache_proportion = total_generated_prefill_proportion
-        user_request.prefill_cache_loading_time = 0
-        if set(list(user_request.prefill_cache_position.keys())) != set(list(range(user_request.prompt_length))):
-            user_request.prefill_cache_position = args.MaxHeap_Memory.insert({user_request.user_request_id: list(range(user_request.prompt_length))})
+#         user_request.prefill_cache_proportion = total_generated_prefill_proportion
+#         user_request.prefill_cache_loading_time = 0
+#         if set(list(user_request.prefill_cache_position.keys())) != set(list(range(user_request.prompt_length))):
+#             user_request.prefill_cache_position = args.MaxHeap_Memory.insert({user_request.user_request_id: list(range(user_request.prompt_length))})
         
-        user_request.remaining_computation_time = round_2(user_request.remaining_computation_time)
-        user_request.predicted_remaining_computation_time = round_2(user_request.predicted_remaining_computation_time)
+#         user_request.remaining_computation_time = round_2(user_request.remaining_computation_time)
+#         user_request.predicted_remaining_computation_time = round_2(user_request.predicted_remaining_computation_time)
 
-    return 0
+#     # swapping time based on PCIE
+#     return 0
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()

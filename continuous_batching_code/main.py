@@ -15,6 +15,9 @@ from memory_management import MaxHeap_Memory_Class, compute_GPU_KV_storage_size
 import asyncio
 import math
 
+REQUEST_BLOCKS = 1
+TOTAL_BLOCKS = 1000
+
 
 def initialize_user_request(args):
     user_request_priority = [random.choice(list(range(args.ranks))) for _ in range(args.user_request_num)]
@@ -42,7 +45,7 @@ async def simulator(args, user_requests):
 
     config.ongoing_requests = []
     asyncio.create_task(simulate_incoming_requests(args, full_queue, simulated_predicted_priority, simulated_output_length_bucket))
-    asyncio.create_task(GPU_execute(full_queue))
+    asyncio.create_task(GPU_execute(args.MaxHeap_Memory, full_queue))
     
     save_info, file_name = compute_average_waiting_time(args, config.record_requests, user_request_waiting_time_from_predictor)
     
@@ -61,13 +64,35 @@ async def simulate_incoming_requests(args, full_queue, simulated_predicted_prior
 
         await asyncio.sleep(gap_time/10)
 
-async def GPU_execute(full_queue):
+async def GPU_execute(MaxHeap_Memory, full_queue):
     def one_execute_iteration(ongoing_requests):
         prefilling_requests = []
         # check whether there's prefilling requests in the batch
         for user_request in ongoing_requests:
             if user_request.predicted_remaining_computation_time[0] > 0:
-                prefilling_requests.append(request)
+                prefilling_requests.append(user_request)
+
+        MaxHeap_Memory.update_ongoing_requests(ongoing_requests)
+
+        # allocate memory for each request (token-wise)
+        preempted_requests_memory_killed = []
+        if prefilling_requests != []:
+            # allocate memory for prefilling [user_request.prompt_length tokens]
+            for user_request in prefilling_requests:
+                preempted_requests_memory_killed.extend(
+                    MaxHeap_Memory.allocate_memory_for(user_request, user_request.predicted_remaining_computation_time[0])['preempted_requests'])
+        else:
+            # allocate memory for decoding [1 token]
+            for user_request in ongoing_requests:
+                preempted_requests_memory_killed.extend(
+                    MaxHeap_Memory.allocate_memory_for(user_request, 1)['preempted_requests'])
+
+        # remove preempted requests from prefilling_requests and ongoing_requests
+        prefilling_requests = [user_request for user_request in prefilling_requests if user_request.user_request_id not in [r.user_request_id for r in preempted_requests_memory_killed]]
+        ongoing_requests = [user_request for user_request in ongoing_requests if user_request.user_request_id not in [r.user_request_id for r in preempted_requests_memory_killed]]
+
+        # TODO: do we need to update the computation time for preempted requests?
+
         if prefilling_requests != []:
             # the whole prefilling is one iteration
             iteration_time = max([user_request.remaining_computation_time[0] for user_request in prefilling_requests])
@@ -78,10 +103,14 @@ async def GPU_execute(full_queue):
         else:
             # one decoded token is one iteration
             iteration_time = max([compute_output_time(args, user_request.prompt_length + len(user_request.decoding_cache_position), 1) for user_request in ongoing_requests])
+            # FIXME: prefilling_requests is empty, why enumerate it?
             for user_request in prefilling_requests:
                 user_request.update_computation_time_normal_run(compute_output_time(args, user_request.prompt_length + len(user_request.decoding_cache_position), 1))
-            for request in ongoing_requests:
+            for user_request in ongoing_requests:
                 user_request.update_waiting_time(iteration_time)
+
+        # update MaxHeap_Memory with updated remaining computation time for ongoing_requests
+        MaxHeap_Memory.reconstruct_heap(ongoing_requests)
 
         ongoing_requests = [user_request for user_request in ongoing_requests if user_request.remaining_computation_time[-1] > 0]
         return iteration_time, ongoing_requests
@@ -131,14 +160,15 @@ async def GPU_execute(full_queue):
 
         merged_queue = merge(ongoing_requests, next_batch)
         top_batch_size_requests = merged_queue[:args.batch_size]
-        preempted_requests = [i for i in range(len(ongoing_requests)) if ongoing_requests[i].user_request_id not in [r.user_request_id for r in top_batch_size_requests]]
-        push_back_requests = [i for i in range(len(merged_queue)) if merged_queue[i].user_request_id not in [r.user_request_id for r in top_batch_size_requests]]
+        preempted_requests = [ongoing_requests[i] for i in range(len(ongoing_requests)) if ongoing_requests[i].user_request_id not in [r.user_request_id for r in top_batch_size_requests]]
+        push_back_requests = [merged_queue[i] for i in range(len(merged_queue)) if merged_queue[i].user_request_id not in [r.user_request_id for r in top_batch_size_requests]]
 
         #!! request memory block, swap together or delete (deleted requests)
         # allocate before computing the iteration
         # we have max bandwidth size, might need sequential but unlikely
         # if requests memory belongs to ongoing batch, remove it from batch
         # Dujian
+        # MOVED TO ONE_EXECUTE_ITERATION
 
         #!! update other requests' remaining computation time due to deletion or swapping
         # remaining time = CPU loading time + recomputation time + original remaining time
@@ -182,6 +212,8 @@ async def GPU_execute(full_queue):
             completed_requests = [r for r in config.ongoing_requests if r.remaining_computation_time[-1] == 0]
             #!! delete completed requests' memory block
             # Dujian
+            for user_request in completed_requests:
+                MaxHeap_Memory.deallocate_memory_for(user_request)
 
             await asyncio.sleep(iteration_time/10)
         

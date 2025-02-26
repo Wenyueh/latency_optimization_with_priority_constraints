@@ -1,5 +1,7 @@
-import math, sys 
+import heapq
+import math, sys
 from heapq import heappush, heappop
+from semantic_predictor import update_cache_loading_or_recomputation_time_and_extra_saving_time
 
 
 class TwoDimensionalPriorityQueue:
@@ -23,32 +25,147 @@ class TwoDimensionalPriorityQueue:
         return len(self.heap) == 0
 
 class MaxHeap_Memory_Class:
-    def __init__(self):
-        pass  
-
-    # how many tokens have occupied this block
-    def space_taken_by_block(self, block_id):
-        pass
-    
-    # how many tokens can stil be stored in this block
-    def space_left_in_block(self, block_id):
-        pass
-
-    # the GPU is full or not
-    def is_full(self):
-        # check whether all blocks are full
-        pass
+    def __init__(self, args):
+        self.total_blocks = args.KV_block_number
+        self.block_size = args.block_size
+        self.used_blocks = 0
+        self.heap = []                  # 3-tuple: (-priority, -remaining_time, request)
+        self.request_id2blocks = {}               # {request_id: block_number}
+        self.request_id2tokens = {}               # {request_id: token_number}
+        self.ongoing_request_ids = set()   # {request_id}
 
     # how many left
     def storage_left(self):
-        pass
+        return self.total_blocks - self.used_blocks
 
-    # KV: {request_id: [token1, token2, ...]}
-    def insert(self, KV):
-        pass
+    def push(self, item, priority1, priority2):
+        # semantic priority, remaining computation time
+        # Use a tuple (priority1, priority2, item) to maintain the max heap property
+        heappush(self.heap, (-priority1, -priority2, item))
 
-    def remove(self, size):
-        pass
+    def pop(self):
+        # Pop the item with the lowest priority
+        return heappop(self.heap)[2]
+
+    def peek(self):
+        # Peek at the item with the lowest priority without popping it
+        return self.heap[0][2]
+
+    def reconstruct_heap(self, ongoing_request_list):
+        ongoing_request_id2request = {request.user_request_id: request for request in ongoing_request_list}
+        new_heap = []
+        for item in self.heap:
+            request_id = item[2].user_request_id
+            if request_id not in ongoing_request_id2request.keys():
+                new_heap.append(item)
+            else:
+                request = ongoing_request_id2request[request_id]
+                new_heap.append((-request.predicted_priority,-(request.predicted_remaining_computation_time[-1] + request.prefill_cache_loading_time + request.decoding_cache_loading_time), request))
+
+        heapq.heapify(new_heap)
+        self.heap = new_heap
+
+    def update_ongoing_requests(self, ongoing_request_list):
+        self.ongoing_request_ids = {request.user_request_id for request in ongoing_request_list}
+
+    def usable_tokens_for(self, request_id):
+        if request_id in self.request_id2blocks and request_id in self.request_id2tokens:
+            return self.request_id2blocks[request_id] * self.block_size - self.request_id2tokens[request_id]
+        return 0
+
+    def allocate_memory_for(self, user_request, requested_tokens):
+        """
+
+        :param user_request:
+        :param requested_tokens:
+        :return:
+        """
+        res = {'preempted_requests': [], 'deallocated_requests': []}    # {{preempted_request_id: list of request object}, {deallocated_request_id: list of request object}}
+        request_id = user_request.user_request_id
+        priority = user_request.predicted_priority
+        remaining_time = user_request.predicted_remaining_computation_time[-1] + user_request.prefill_cache_loading_time + user_request.decoding_cache_loading_time
+        if request_id not in self.request_id2blocks:
+            self.request_id2blocks[request_id] = 0
+            self.request_id2tokens[request_id] = 0
+            self.push(user_request, priority, remaining_time)
+
+        if self.usable_tokens_for(request_id) >= requested_tokens:
+            self.request_id2tokens[request_id] += requested_tokens
+            return res
+
+        requested_blocks = math.ceil((requested_tokens - self.request_id2tokens[request_id]) / self.block_size)
+
+        if self.storage_left() >= requested_blocks:
+            self.request_id2blocks[request_id] += requested_blocks
+            self.request_id2tokens[request_id] += requested_tokens
+            self.used_blocks += requested_blocks
+            return res
+        else:
+            requested_blocks_remaining = requested_blocks
+            requested_blocks_remaining -= self.storage_left()
+            # self.request_id2blocks[request_id] += self.storage_left()
+            # self.request_id2tokens[request_id] += self.storage_left() * self.block_size
+            # self.used_blocks += self.storage_left()
+
+            # deallocate the memory from the lowest priority request
+            while requested_blocks_remaining > 0:
+                lowest_priority_request = self.pop()
+                lowest_priority_request_id = lowest_priority_request.user_request_id
+                if lowest_priority_request_id in self.ongoing_request_ids:
+                    self.ongoing_request_ids.remove(lowest_priority_request_id)
+                    res['preempted_requests'].append(lowest_priority_request)
+
+                if lowest_priority_request_id == request_id:
+                    assert lowest_priority_request in res['preempted_requests']
+                    return res
+
+                # lazy deletion of the completed request and the preempted request due to the failed memory allocation
+                if lowest_priority_request_id not in self.request_id2blocks:
+                    continue
+                else:
+                    if self.request_id2blocks[lowest_priority_request_id] == 0:
+                        self.request_id2blocks.pop(lowest_priority_request_id)
+                        self.request_id2tokens.pop(lowest_priority_request_id)
+                        continue
+
+                if self.request_id2blocks[lowest_priority_request_id] <= requested_blocks_remaining:
+                    requested_blocks_remaining -= self.request_id2blocks[lowest_priority_request_id]
+                    # self.request_id2blocks[request_id] += self.request_id2blocks[lowest_priority_request_id]
+                    self.request_id2blocks.pop(lowest_priority_request_id)
+                    self.request_id2tokens.pop(lowest_priority_request_id)
+                    res['deallocated_requests'].append(lowest_priority_request)
+                else:
+                    requested_blocks_remaining = 0
+                    # self.request_id2blocks[request_id] += requested_blocks_remaining
+                    self.request_id2blocks[lowest_priority_request_id] -= requested_blocks_remaining
+                    self.request_id2tokens[lowest_priority_request_id] = self.request_id2blocks[lowest_priority_request_id] * self.block_size
+
+                    #TODO: update remaining time for the lowest_priority_request
+                    update_cache_loading_or_recomputation_time_and_extra_saving_time(lowest_priority_request)
+                    remaining_time = lowest_priority_request.predicted_remaining_computation_time[-1] + lowest_priority_request.prefill_cache_loading_time + lowest_priority_request.decoding_cache_loading_time
+                    self.push(lowest_priority_request, priority, remaining_time)
+
+                    res['deallocated_requests'].append(lowest_priority_request)
+
+            # atomic memory allocation for the request
+            self.request_id2blocks[request_id] += requested_blocks
+            self.request_id2tokens[request_id] += requested_tokens
+            self.used_blocks += self.storage_left()
+
+        return res
+
+    def deallocate_memory_for(self, user_request):
+        request_id = user_request.user_request_id
+        if request_id in self.ongoing_request_ids:
+            self.ongoing_request_ids.remove(request_id)
+
+        if request_id in self.request_id2blocks:
+            self.request_id2blocks.pop(request_id)
+            self.request_id2tokens.pop(request_id)
+            self.used_blocks -= self.request_id2blocks[request_id]
+            # heap deletion is deferred to the future allocation
+
+
 
 
 

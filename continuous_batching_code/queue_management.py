@@ -6,8 +6,9 @@ from semantic_predictor import (
     compute_total_generation_time, 
     compute_generated_tokens,
     compute_predicted_total_generation_time,
-    compute_optimal_prefill_length,
-    compute_optimal_decoding_length
+    compute_optimal_prefill_cache_proportion,
+    compute_optimal_decoding_cache_length,
+    compute_output_time
 )
 import numpy as np
 import operator
@@ -33,80 +34,97 @@ class Request:
         self.predicted_remaining_computation_time = compute_predicted_total_generation_time(args, self)
         self.waiting_time = 0
 
-        self.optimal_prefill_cache_proportion = 0 if self.prompt_length == float('inf') else compute_optimal_prefill_length(args, self.prompt_length)/self.prompt_length
-        self.optimal_decoding_cache_length = 0 if self.prompt_length == float('inf') else compute_optimal_decoding_length(args, computed_output_length_bucket_value * (args.max_output_length/args.length_bucket_num))
-        self.prefill_cache_proportion = 0 # with respect to prompt length
+        self.optimal_prefill_cache_proportion = 0 if self.prompt_length == float('inf') else compute_optimal_prefill_cache_proportion(args, self.prompt_length)
+        self.optimal_decoding_cache_length = 0 if self.prompt_length == float('inf') else compute_optimal_decoding_cache_length(args, self.prompt_length)
+        self.CPU_prefilling_cache = [] # with respect to prompt length
+        self.CPU_prefilling_loaded_cache = []
         self.prefill_cache_loading_time = 0
-        self.prefill_cache_loaded_proportion = 0 # what proportion of the cache is loaded with respect to prompt length
-        self.prefill_cache_position = {} # the position of the cache in the cache block
 
-        self.decoding_cache_length = 0
+        self.CPU_decoding_cache = []
+        self.CPU_decoding_loaded_cache = []
         self.decoding_cache_loading_time = 0
-        self.decoding_cache_loaded_length = 0 # how many tokens are loaded
-        self.decoding_cache_position = {} # the position of the cache in the cache block
 
         # the previous request, if preempted, need to spend some time to save its cache
         self.previous_save_time = 0
 
-    ## assuming that the request can be run in the next interval
-    ## don't consider the preemption condition
-    ## and thus we don't compute the caching or loading time
-    def update_computation_time_normal_run(self, running_time):
-        if running_time >= self.previous_save_time:
-            running_time -= self.previous_save_time
-            self.previous_save_time = 0
+    def swap_or_delete_update(self, remaining_tokens_on_GPU):
+        finished_computation_time = self.finished_computation_time
+        prompt_length = self.prompt_length
+        prefill_time, _, _ = self.remaining_computation_time
+
+        if remaining_tokens_on_GPU > prompt_length:
+            # don't need to update prefilling time
+            update_prefill = False 
+            on_GPU_decoded_token_number = remaining_tokens_on_GPU - prompt_length
         else:
-            self.previous_save_time = max(0, self.previous_save_time - running_time)
-            return 
-
-        # remaining loading time of cache
-        prefill_cache_loading_time_remained = round_2(self.prompt_length * self.args.cache_loading_speed * (self.prefill_cache_proportion-self.prefill_cache_loaded_proportion))
-        decoding_cache_loading_time_remained = round_2(self.args.cache_loading_speed * (self.decoding_cache_length-self.decoding_cache_loaded_length))
-
-        # if the running time is not enough to load the prefilling cache, then we don't need to update the time at all
-        if running_time <= prefill_cache_loading_time_remained:
-            self.prefill_cache_loaded_proportion += round_2(running_time / (self.prompt_length * self.args.cache_loading_speed))
-        # if the running time is enough to load the prefilling cache, we check whether it is enough to finish prefilling, if not, we update the time needed to finish prefilling
-        elif running_time > prefill_cache_loading_time_remained and running_time <= prefill_cache_loading_time_remained + self.remaining_computation_time[0]:
-            self.prefill_cache_loaded_proportion = self.prefill_cache_proportion
-            time_left_for_prefilling = running_time - prefill_cache_loading_time_remained
-            self.remaining_computation_time[0] -= time_left_for_prefilling
-            self.predicted_remaining_computation_time[0] = max(0, self.predicted_remaining_computation_time[0]- time_left_for_prefilling)
-            self.remaining_computation_time[-1] -= time_left_for_prefilling
-            self.predicted_remaining_computation_time[-1] = max(0, self.predicted_remaining_computation_time[-1]-time_left_for_prefilling)
-            self.finished_computation_time += time_left_for_prefilling
-        # if the running time is enough to load the prefilling cache and prefilling computation
-        # then we check whether it is enough to finish loading decoding time, if not, we update the time needed to finish prefilling
-        elif running_time > prefill_cache_loading_time_remained + self.remaining_computation_time[0] and running_time <= prefill_cache_loading_time_remained + self.remaining_computation_time[0] + decoding_cache_loading_time_remained:
-            time_left_for_loading_decoding_cache = running_time - prefill_cache_loading_time_remained - self.remaining_computation_time[0]
-            self.decoding_cache_loaded_length += int(time_left_for_loading_decoding_cache/self.args.cache_loading_speed)
-
-            self.prefill_cache_loaded_proportion = self.prefill_cache_proportion
-            self.remaining_computation_time[-1] -= self.remaining_computation_time[0]
-            self.predicted_remaining_computation_time[-1] = max(0, self.predicted_remaining_computation_time[-1] - self.remaining_computation_time[0])
-            self.finished_computation_time += self.remaining_computation_time[0]
-            self.remaining_computation_time[0] = 0
-            self.predicted_remaining_computation_time[0] = 0
-        # if the running time covers prefilling cache + prefilling computation, then we check whether it is enough to finish decoding cache loading, if not, we just update prefilling time
+            update_prefill = True
+            on_GPU_decoded_token_number = 0
+            on_GPU_prefilled_token_number = remaining_tokens_on_GPU
+        
+        # consider decoding part
+        optimal_decoding_cache_length = compute_optimal_decoding_cache_length(args, prompt_length)
+        total_generated_tokens = compute_generated_tokens(args, prompt_length, finished_computation_time-(compute_prefill_time(args, prompt_length)-prefill_time))
+        # if all on GPU, then we update the recomputation time
+        if on_GPU_decoded_token_number > optimal_decoding_cache_length:
+            recomputation_time = compute_output_time(args, prompt_length + on_GPU_decoded_token_number, total_generated_tokens - on_GPU_decoded_token_number) 
+            self.remaining_computation_time[1] -= recomputation_time
+            self.remaining_computation_time[-1] += recomputation_time
+            self.predicted_remaining_computation_time[1] -= recomputation_time
+            self.predicted_remaining_computation_time[-1] += recomputation_time
+            self.finished_computation_time -= recomputation_time
         else:
-            assert running_time > prefill_cache_loading_time_remained + self.remaining_computation_time[0] + decoding_cache_loading_time_remained
-            self.prefill_cache_loaded_proportion = self.prefill_cache_proportion
-            self.decoding_cache_loaded_length = self.decoding_cache_length
+            cached_tokens = list(range(on_GPU_decoded_token_number, min(optimal_decoding_cache_length, total_generated_tokens)))
+            self.CPU_decoding_cache = cached_tokens
+            self.decoding_cache_loading_time = len(self.CPU_decoding_cache) * self.args.cache_loading_speed
+            recomputation_time = compute_output_time(args, prompt_length + len(self.CPU_decoding_cache), total_generated_tokens - len(self.CPU_decoding_cache))
+            # update computation time
+            self.remaining_computation_time[1] += recomputation_time
+            self.predicted_remaining_computation_time[-1] += recomputation_time
+            self.finished_computation_time -= recomputation_time
 
-            time_left_for_decoding = running_time - prefill_cache_loading_time_remained - self.remaining_computation_time[0] - decoding_cache_loading_time_remained
-            self.finished_computation_time += time_left_for_decoding + self.remaining_computation_time[0]
-            self.remaining_computation_time = [0, self.remaining_computation_time[1] - time_left_for_decoding, self.remaining_computation_time[-1] - time_left_for_decoding - self.remaining_computation_time[0]]
-            self.predicted_remaining_computation_time = [0, max(0,self.predicted_remaining_computation_time[1] - time_left_for_decoding), max(0, self.predicted_remaining_computation_time[-1] - time_left_for_decoding - self.predicted_remaining_computation_time[0])]
+        if update_prefill:
+            # consider prefilling part
+            finished_prefilling_time = compute_prefill_time(args, prompt_length) - prefill_time
+            if compute_optimal_prefill_cache_proportion(args, prompt_length) == 0:
+                updated_prefill_time = round_2((self.prompt_length ** 2)*self.args.prefill_speed_coefficient1 + self.args.prefill_speed_coefficient2 * (self.prompt_length - on_GPU_prefilled_token_number))
+                self.remaining_computation_time[0] = updated_prefill_time
+                self.remaining_computation_time[-1] = self.remaining_computation_time[-1] - prefill_time + updated_prefill_time
+                self.predicted_remaining_computation_time[0] = updated_prefill_time
+                self.predicted_remaining_computation_time[-1] = self.predicted_remaining_computation_time[-1] - prefill_time + updated_prefill_time
+                self.finished_computation_time -= finished_prefilling_time
+                self.CPU_prefilling_cache = []
+                self.prefill_cache_loading_time = 0
+            else:
+                self.CPU_prefilling_cache = list(range(on_GPU_prefilled_token_number, prompt_length))
+                self.prefill_cache_loading_time = len(self.CPU_prefilling_cache) * self.args.cache_loading_speed
 
-        self.finished_computation_time = round_2(self.finished_computation_time)
-        self.remaining_computation_time = round_2(self.remaining_computation_time)
-        self.predicted_remaining_computation_time = round_2(self.predicted_remaining_computation_time)
+    def update_normal_prefilling_iteration(self):
+        self.CPU_prefilling_loaded_cache = self.CPU_prefilling_cache
+        self.CPU_prefilling_cache = []
+        self.prefill_cache_loading_time = 0
 
-        # if the predicted time is longer than actually needed, we update the predicted time = 0
-        if self.remaining_computation_time[1] <= 0:
-            self.predicted_remaining_computation_time[1] = 0
-        if self.remaining_computation_time[-1] <= 0:
-            self.predicted_remaining_computation_time[-1] = 0
+        self.remaining_computation_time[-1] -= self.remaining_computation_time[0]
+        self.predicted_remaining_computation_time[-1] -= self.predicted_remaining_computation_time[0]
+        self.remaining_computation_time[0] = 0
+        self.predicted_remaining_computation_time[0] = 0
+
+    def update_normal_decoding_iteration(self, MaxHeap_Memory):
+        self.CPU_prefilling_cache = []
+        self.CPU_prefilling_loaded_cache = []
+        self.prefill_cache_loading_time = 0
+
+        self.CPU_decoding_loaded_cache = self.CPU_decoding_cache
+        self.CPU_decoding_cache = []    
+        self.decoding_cache_loading_time = 0
+
+        decoded_cache_length = max(self.CPU_decoding_loaded_cache) if self.CPU_decoding_loaded_cache != [] else max(0, MaxHeap_Memory.request_id2tokens[self.user_request_id]-1 - self.prompt_length)
+        computing_time = compute_output_time(self.args, self.prompt_length + decoded_cache_length, 1)
+        self.remaining_computation_time[1] -= computing_time
+        self.predicted_remaining_computation_time[1] -= computing_time
+        self.remaining_computation_time[-1] -= computing_time
+        self.predicted_remaining_computation_time[-1] -= computing_time
+        self.remaining_computation_time[0] = 0
+        self.predicted_remaining_computation_time[0] = 0
 
     def update_waiting_time(self, waiting_time):
         self.waiting_time += waiting_time
@@ -128,6 +146,23 @@ class Request:
 class TwoDimensionalPriorityQueue:
     def __init__(self):
         self.heap = []
+
+    def __len__(self):
+        return len(self.heap)
+
+    def delete(self, item):
+        assert item in self.heap, "Item not in the heap"
+        index = self.heap.index(item)
+        # If the item is the last element, just pop it
+        if index == len(self.heap) - 1:
+            return self.heap.pop()
+        # Swap with the last element
+        self.heap[index], self.heap[-1] = self.heap[-1], self.heap[index]
+        self.heap.pop()  # actually remove it
+
+        # Restore the heap property:
+        # Try heapify_down first; if that doesn't fix, we do a heapify_up
+        heapify(self.heap)
 
     def push(self, item, priority1, priority2):
         # semantic priority, remaining computation time
@@ -157,7 +192,6 @@ class PriorityQueue:
 
     def add_unsorted_node(self, user_request):
         self.unsorted_nodes.append(user_request)
-        # TODO: use the total remaining time of the user requests instead of 'predicted_remaining_computation_time'
         if self.first_unsorted_node_idx < 0:
             if len(self.unsorted_nodes) == 1:
                 self.first_unsorted_node_idx = 0
@@ -215,7 +249,7 @@ class PriorityQueue:
     def fetch_next_node(self):
         # assert len(self.root.children) == 1, "Root should have only one child."       
         if self.two_dim_priority_queue.is_empty():
-            next_sorted_node = Request(self.args, -1, float('inf'), float('inf'), float('inf'))
+            next_sorted_node = Request(self.args, -1, float('inf'), float('inf'))
         else:
             next_sorted_node = self.two_dim_priority_queue.peek()
         if len(self.unsorted_nodes) > 0:
@@ -223,7 +257,6 @@ class PriorityQueue:
                 # re-compute the first unsorted node index if it is not valid
                 self.find_max_unsorted_node_idx()
 
-            # TODO: use the total remaining time of the user requests instead of 'predicted_remaining_computation_time'
             next_unsorted_node = self.unsorted_nodes[self.first_unsorted_node_idx]
             if (next_unsorted_node.predicted_priority < next_sorted_node.predicted_priority):
                 # lazy deletion by replacing the node with a dummy node
@@ -244,7 +277,7 @@ class PriorityQueue:
                     self.first_unsorted_node_idx = -1
                     return next_unsorted_node
 
-        self.three_dim_priority_queue.pop()
+        self.two_dim_priority_queue.pop()
         return next_sorted_node
     
     def fetch_next_k_nodes(self, k, require_decode=False, max_prefilling_time=float('inf')):
@@ -254,55 +287,29 @@ class PriorityQueue:
         if require_decode:
             while len(all_nodes) < k:
                 next_node = self.fetch_next_node()
-                if next_node.predicted_remaining_computation_time[-1] == 0:
+                if next_node.user_request_id == -1:
+                    break
+                if next_node.predicted_remaining_computation_time[-1] <= 0:
                     all_nodes.append(next_node)
                 else:
                     insert_back_nodes.append(next_node)
-                if next_node.user_request_id == -1:
+
+                if len(self.unsorted_nodes) + len(self.two_dim_priority_queue.heap) == 0:
                     break
         else:
             while len(all_nodes) < k:
                 next_node = self.fetch_next_node()
+                max_prefilling_time = min(next_node.predicted_remaining_computation_time[0], max_prefilling_time)
+                if next_node.user_request_id == -1:
+                    break
                 if next_node.predicted_remaining_computation_time[0] <= max_prefilling_time:
                     all_nodes.append(next_node)
                 else:
                     insert_back_nodes.append(next_node)
-                if next_node.user_request_id == -1:
-                    break
-        
-        # first_node = self.fetch_next_node()
-        # # if empty, return empty list
-        # if first_node.user_request_id == -1:
-        #     return all_nodes
-        
-        # # highest-priority node is doing prefilling or decoding
-        # if first_node.predicted_remaining_computation_time[0] > 0:
-        #     still_prefill = True 
-        # else:
-        #     still_prefill = False
-        # # if prefilling, fetch next k
-        # if still_prefill:
-        #     while len(all_nodes) < k-1:
-        #         next_node = self.fetch_next_node()
-        #         # is still prefilling, we can choose any node that is still prefilling but takes time <= the first node
-        #         if next_node.predicted_remaining_computation_time[0] > first_node.predicted_remaining_computation_time[0]:
-        #             insert_back_nodes.append(next_node)
-        #         else:
-        #             all_nodes.append(next_node)
-        #         if next_node.user_request_id == -1:
-        #             break
-        # # if decoding, skip any next nodes that are doing prefilling
-        # else:
-        #     while len(all_nodes) < k-1:
-        #         next_node = self.fetch_next_node()
-        #         if next_node.user_request_id == -1:
-        #             break
-        #         # is doing decoding, then choose those that are only doing decoding
-        #         if next_node.predicted_remaining_computation_time[0] == 0:
-        #             all_nodes.append(next_node)
-        #         else:
-        #             insert_back_nodes.append(next_node)
 
+                if len(self.unsorted_nodes) + len(self.two_dim_priority_queue.heap) == 0:
+                    break
+                
         for one_node in insert_back_nodes:
             self.two_dim_priority_queue.push(one_node, one_node.predicted_priority, one_node.predicted_remaining_computation_time[-1] + one_node.prefill_cache_loading_time + one_node.decoding_cache_loading_time)
 
@@ -312,14 +319,10 @@ class PriorityQueue:
         return all_nodes
 
     async def incremental_update(self):
-        self.is_GPU_job_completed = False
-        # TODO: add the 'is_GPU_job_completed' flag to the PriorityQueue class and include it in the following condition to ensure atomic operation
-        # TODO: the 'is_GPU_job_completed' flag should be set to True when the GPU job is completed, and False at the beginning of the next GPU job
-        while len(self.unsorted_nodes) > 0 and not self.is_GPU_job_completed:
+        while len(self.unsorted_nodes) > 0:
             next_unsorted_node = self.unsorted_nodes.pop(0)
             self.first_unsorted_node_idx -= 1
             # delete the dummy node
-            # TODO: use the total remaining time of the user requests instead of 'predicted_remaining_computation_time'
             if next_unsorted_node.predicted_priority < float('inf'):
                 self.two_dim_priority_queue.push(next_unsorted_node, next_unsorted_node.predicted_priority, next_unsorted_node.predicted_remaining_computation_time[-1]+ next_unsorted_node.prefill_cache_loading_time + next_unsorted_node.decoding_cache_loading_time)
 
@@ -362,7 +365,7 @@ class PriorityQueue:
                 print_heap_tree(heap, left_index, child_indent, "L--- ")
                 print_heap_tree(heap, right_index, child_indent, "R--- ")
 
-        print(bcolors.OKGREEN + "Min Heap:" + bcolors.ENDC)
+        print(bcolors.OKGREEN + "Data Management for Waiting Requests (MinHeap):" + bcolors.ENDC)
         print_heap_tree(self.two_dim_priority_queue.heap)
         visualize_unsorted_nodes(self.unsorted_nodes)
 

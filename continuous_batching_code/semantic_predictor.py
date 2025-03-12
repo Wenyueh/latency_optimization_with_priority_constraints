@@ -87,7 +87,7 @@ def compute_output_time(args, prompt_length, output_length):
 # prompt_length ^ 2 * prefill_speed + constant (the constant comes from the feedforward network)
 def compute_prefill_time(args, prompt_length):
     p = prompt_length
-    return round_2((p ** 2)*args.prefill_speed_coefficient1 + args.prefill_speed_coefficient2)
+    return round_2((p ** 2)*args.prefill_speed_coefficient1 + args.prefill_speed_coefficient2 * p)
 
 # given computation length, how many tokens are computed
 def compute_generated_tokens(args, prompt_length, output_time):
@@ -98,15 +98,15 @@ def compute_generated_tokens(args, prompt_length, output_time):
     output_length_possibility_2 = (1/(2*a)) * (-1 * b - math.sqrt(b**2 - 4*a*c))
     output_length = int(max(output_length_possibility_1, output_length_possibility_2))
     return output_length
-def compute_optimal_prefill_length(args, prompt_length):
-    if args.cache_loading_speed * prompt_length > (args.prefill_speed_coefficient1 * prompt_length**2 + args.prefill_speed_coefficient2 * prompt_length):
-        return 1
-    else:
+def compute_optimal_prefill_cache_proportion(args, prompt_length):
+    if args.cache_loading_speed * prompt_length > compute_prefill_time(args, prompt_length):
         return 0
+    else:
+        return 1
     # numerator = args.cache_loading_speed - args.prefill_speed_coefficient2 * prompt_length
     # denominator = 2 * args.prefill_speed_coefficient1 * (prompt_length**2)
     # return min(max(0, numerator/denominator), 1)
-def compute_optimal_decoding_length(args, prompt_length):
+def compute_optimal_decoding_cache_length(args, prompt_length):
     part1 = args.token_decoding_speed_coefficient1*prompt_length
     part2 = (args.token_decoding_speed_coefficient1 + 2*args.token_decoding_speed_coefficient2)/2
     optimal = (args.cache_loading_speed - part1 - part2)/(2*args.token_decoding_speed_coefficient1)
@@ -237,5 +237,4 @@ if __name__ == '__main__':
     simulated_predicted_output_bucket = simulated_output_length_bucket_predictor(args, list(range(args.user_request_num)), oracle_predicted_output_bucket)
     print(simulated_predicted_priority)
     print(simulated_predicted_output_bucket)
-
 

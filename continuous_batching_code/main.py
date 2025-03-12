@@ -9,10 +9,15 @@ from semantic_predictor import (
     oracle_output_length_bucket_predictor, 
     simulated_priority_predictor, 
     simulated_output_length_bucket_predictor,
-    update_cache_loading_or_recomputation_time_and_extra_saving_time, 
+    compute_output_time
 )
+from memory_management import MaxHeap_Memory_Class, compute_GPU_KV_storage_size
 import asyncio
 import math
+
+REQUEST_BLOCKS = 1
+TOTAL_BLOCKS = 1000
+
 
 def initialize_user_request(args):
     user_request_priority = [random.choice(list(range(args.ranks))) for _ in range(args.user_request_num)]
@@ -21,177 +26,15 @@ def initialize_user_request(args):
     return user_request_priority, user_request_prompt_length, user_request_output_length
 
 # whether we preempt user_request_1 by user_request_2
-def trigger_preemption(args, user_request_1, user_request_2):
-    if user_request_1.predicted_priority > user_request_2.predicted_priority:
-        return True 
-    elif user_request_1.predicted_priority < user_request_2.predicted_priority:
-        return False
-    elif user_request_1.predicted_priority == user_request_2.predicted_priority:
-        # copy the user_request_1 object
-        user_request_1_copy = deepcopy(user_request_1)
-        # add loading_cache/recomputation time to total remaining time of the preempted request
-        user_request_1_copy_save_time = update_cache_loading_or_recomputation_time_and_extra_saving_time(args, user_request_1_copy)
-
-        # if preempting: first user_request_2, then user_request_1
-        preempting_time_user_request_2 = user_request_1_copy_save_time + user_request_2.prefill_cache_loading_time + user_request_2.decoding_cache_loading_time + user_request_2.predicted_remaining_computation_time[-1]
-        preempting_time_user_request_1_copy = user_request_1_copy.prefill_cache_loading_time + user_request_1_copy.decoding_cache_loading_time + user_request_1_copy.predicted_remaining_computation_time[-1]
-        preempting_total_waiting_time = 2*preempting_time_user_request_2 + preempting_time_user_request_1_copy
-        
-        # if not preempting: first user_request_1, then user_request_2
-        left_prefill_loading_time = (user_request_1.prefill_cache_proportion-user_request_1.prefill_cache_loaded_proportion) * user_request_1.prefill_cache_loading_time
-        left_decoding_loading_time = (user_request_1.decoding_cache_length-user_request_1.decoding_cache_loaded_length) * args.cache_loading_speed
-        no_preempting_time_user_request_1 = left_prefill_loading_time + left_decoding_loading_time + user_request_1.predicted_remaining_computation_time[-1]
-        no_preempting_time_user_request_2 = user_request_2.prefill_cache_loading_time + user_request_2.decoding_cache_loading_time + user_request_2.predicted_remaining_computation_time[-1]
-        no_preempting_total_waiting_time = 2*no_preempting_time_user_request_1 + no_preempting_time_user_request_2
-
-        if preempting_total_waiting_time < no_preempting_total_waiting_time:
-            return True
-        else:
-            return False
-
-async def GPU_execute(arrival_time_id, arrival_intervals, full_queue, ongoing_request, record_requests):
-    config.ongoing_request = ongoing_request
-    config.record_requests = record_requests
-    # if it is not the last batch
-    if arrival_time_id < len(arrival_intervals) - 1:
-        # compute the running time for this interval, before the next batch of requests arrive
-        running_time_for_this_interval = round_2(arrival_intervals[arrival_time_id+1] - arrival_intervals[arrival_time_id])
-        # total running time required = load cache first and then compute the rest
-
-        # remaining loading time of cache
-        prefill_cache_loading_time_remained = round_2(config.ongoing_request.prompt_length * config.ongoing_request.args.cache_loading_speed * (config.ongoing_request.prefill_cache_proportion-config.ongoing_request.prefill_cache_loaded_proportion))
-        decoding_cache_loading_time_remained = round_2(config.ongoing_request.args.cache_loading_speed * (config.ongoing_request.decoding_cache_length-config.ongoing_request.decoding_cache_loaded_length))
-
-        full_time_required = config.ongoing_request.previous_save_time + prefill_cache_loading_time_remained + decoding_cache_loading_time_remained + config.ongoing_request.remaining_computation_time[-1]
-
-        print("*"*50)
-        print('running_time_for_this_interval:', running_time_for_this_interval)
-        print('full_time_required:', full_time_required)
-        print("*"*50)
-        # if the running time for this interval is longer than the current request
-        # we just keep putting the next highest priority request to the GPU while at the same time computing the next highest priority request
-        # until the running time for this interval is used up
-        # otherwise, we just run the current request and compute the next highest priority request
-        if running_time_for_this_interval > full_time_required:
-            while running_time_for_this_interval > full_time_required and (len(full_queue.two_dim_priority_queue.heap)+ len(full_queue.unsorted_nodes)) !=0:
-                # put the currently highest priority user request to the GPU
-                # update both actual time and predicted time
-                config.ongoing_request.update_computation_time_normal_run(full_time_required)
-                full_queue.update_waiting_time(full_time_required)
-                config.ongoing_request.update_waiting_time(full_time_required)
- 
-                # update log
-                config.record_requests[config.ongoing_request.user_request_id] = config.ongoing_request
-                config.ongoing_request.print_out_features()
-                full_queue.visualize()
-                print('-'*50)
-                print('-'*50)
-                await asyncio.sleep(full_time_required/10)
-                
-                # running time for the next request
-                running_time_for_this_interval -= full_time_required
-                ##### write one function to compute the next highest priority request asynchronously #####
-                # put the currently highest priority user request to the GPU
-                config.ongoing_request = full_queue.fetch_next_node()
-                ##### write one function to compute the next highest priority request asynchronously #####
-
-                # need to load cache first and then compute the rest
-                prefill_cache_loading_time_remained = round_2(config.ongoing_request.prompt_length * config.ongoing_request.args.cache_loading_speed * (config.ongoing_request.prefill_cache_proportion-config.ongoing_request.prefill_cache_loaded_proportion))
-                decoding_cache_loading_time_remained = round_2(config.ongoing_request.args.cache_loading_speed * (config.ongoing_request.decoding_cache_length-config.ongoing_request.decoding_cache_loaded_length))
-                full_time_required = config.ongoing_request.previous_save_time + prefill_cache_loading_time_remained + decoding_cache_loading_time_remained +  + config.ongoing_request.remaining_computation_time[-1]
-
-                # if we run out of the running time for this interval
-                if running_time_for_this_interval <= full_time_required:
-                    # asynchronously compute the next node
-                    # put the currently highest priority user request to the GPU
-                    config.ongoing_request.update_computation_time_normal_run(running_time_for_this_interval)
-                    full_queue.update_waiting_time(running_time_for_this_interval)
-                    config.ongoing_request.update_waiting_time(running_time_for_this_interval)
-                    config.record_requests[config.ongoing_request.user_request_id] = config.ongoing_request
-
-                    config.ongoing_request.print_out_features()
-                    full_queue.visualize()
-                    print('-'*50)
-                    print('-'*50)
-                    await asyncio.sleep(running_time_for_this_interval/10)
-
-                elif (len(full_queue.two_dim_priority_queue.heap) + len(full_queue.unsorted_nodes)) == 0:
-                    # if there is no more request in the queue, and the ongoing request is also completed
-                    # put the currently highest priority user request to the GPU
-                    config.ongoing_request.update_computation_time_normal_run(config.ongoing_request.remaining_computation_time[-1])
-                    config.ongoing_request.update_waiting_time(config.ongoing_request.remaining_computation_time[-1])
-                    
-                    config.record_requests[config.ongoing_request.user_request_id] = config.ongoing_request
-                    config.ongoing_request.print_out_features()
-                    config.ongoing_request = None
-                    full_queue.visualize()
-                    print('-'*50)
-                    print('-'*50)
-                    
-                    await asyncio.sleep(running_time_for_this_interval/10)
-                    break
-
-        else:
-            # run the currently highest priority user request on the GPU
-            config.ongoing_request.update_computation_time_normal_run(running_time_for_this_interval)
-            full_queue.update_waiting_time(running_time_for_this_interval)
-            config.ongoing_request.update_waiting_time(running_time_for_this_interval)
-
-            config.record_requests[config.ongoing_request.user_request_id] = config.ongoing_request
-            config.ongoing_request.print_out_features()
-            full_queue.visualize()
-            print('-'*50)
-            print('-'*50)
-            
-            await asyncio.sleep(running_time_for_this_interval/10)
-    
-    else:
-        print(bcolors.WARNING + 'Last batch of requests' + bcolors.ENDC)
-        # after we have put all requests in the queue, we just process 1 by 1
-        while (len(full_queue.two_dim_priority_queue.heap) + len(full_queue.unsorted_nodes)) != 0:
-            # remaining loading time of cache
-            prefill_cache_loading_time_remained = round_2(config.ongoing_request.prompt_length * config.ongoing_request.args.cache_loading_speed * (config.ongoing_request.prefill_cache_proportion-config.ongoing_request.prefill_cache_loaded_proportion))
-            decoding_cache_loading_time_remained = round_2(config.ongoing_request.args.cache_loading_speed * (config.ongoing_request.decoding_cache_length-config.ongoing_request.decoding_cache_loaded_length))
-            running_time_for_this_interval = config.ongoing_request.previous_save_time + prefill_cache_loading_time_remained + decoding_cache_loading_time_remained + config.ongoing_request.remaining_computation_time[-1]
-
-            # put the currently highest priority user request to the GPU
-            config.ongoing_request.update_computation_time_normal_run(running_time_for_this_interval)
-            full_queue.update_waiting_time(running_time_for_this_interval)
-            config.ongoing_request.update_waiting_time(running_time_for_this_interval)
-            config.record_requests[config.ongoing_request.user_request_id] = config.ongoing_request
-            config.ongoing_request.print_out_features()
-            full_queue.visualize()
-            print('-'*50)
-            print('-'*50)
-            
-            await asyncio.sleep(running_time_for_this_interval/10)
-
-            config.ongoing_request = full_queue.fetch_next_node()
-
-            if (len(full_queue.two_dim_priority_queue.heap) + len(full_queue.unsorted_nodes)) == 0:
-                # remaining loading time of cache
-                prefill_cache_loading_time_remained = round_2(config.ongoing_request.prompt_length * config.ongoing_request.args.cache_loading_speed * (config.ongoing_request.prefill_cache_proportion-config.ongoing_request.prefill_cache_loaded_proportion))
-                decoding_cache_loading_time_remained = round_2(config.ongoing_request.args.cache_loading_speed * (config.ongoing_request.decoding_cache_length-config.ongoing_request.decoding_cache_loaded_length))
-                running_time_for_this_interval = config.ongoing_request.previous_save_time + prefill_cache_loading_time_remained + decoding_cache_loading_time_remained + config.ongoing_request.remaining_computation_time[-1]
-            
-                config.ongoing_request.update_computation_time_normal_run(running_time_for_this_interval)
-                config.ongoing_request.update_waiting_time(running_time_for_this_interval)
-                config.record_requests[config.ongoing_request.user_request_id] = config.ongoing_request
-                config.ongoing_request.print_out_features()
-                full_queue.visualize()
-                print('-'*50)
-                print('-'*50)
-                
-                await asyncio.sleep(running_time_for_this_interval/10)
-
-    full_queue.is_GPU_job_completed = True 
+# if user_request_2 cannot preempt any running requests, then no triggering
+# if user_request_2 can preempt the highest priority request, then preempt from the lowest
+# if user_request_2 can preempt any non-highest priority request, we need to check whether it's prefilling and any higher priority request is decoding
 
 async def simulator(args, user_requests):
     user_request_waiting_time_from_predictor, user_request_arrival_time_from_predictor, time_arrived_requests = compute_arrival_time(args, user_requests)     
 
     print('requests arrive at specific timestamp:', time_arrived_requests)
 
-    arrival_intervals = list(time_arrived_requests.keys())
     oracle_predicted_priority = oracle_priority_predictor(args, list(range(args.user_request_num)))
     oracle_predicted_output_bucket = oracle_output_length_bucket_predictor(args, list(range(args.user_request_num)))
     simulated_predicted_priority = simulated_priority_predictor(args, oracle_predicted_priority)
@@ -200,8 +43,20 @@ async def simulator(args, user_requests):
     full_queue = PriorityQueue(args)
     config.record_requests = {}
 
-    config.ongoing_request = None
+    config.ongoing_requests = []
+    task_building_queue = asyncio.create_task(simulate_incoming_requests(args, full_queue, simulated_predicted_priority, simulated_output_length_bucket))
+    task_GPU_execution = asyncio.create_task(GPU_execute(args.MaxHeap_Memory, full_queue))
+
+    await task_building_queue
+    await task_GPU_execution
+    
+    save_info, file_name = compute_average_waiting_time(args, config.record_requests, user_request_waiting_time_from_predictor)
+    
+    return save_info, file_name
+
+async def simulate_incoming_requests(args, full_queue, simulated_predicted_priority, simulated_output_length_bucket):
     for arrival_time_id, arrived_user_request_ids in enumerate(list(time_arrived_requests.values())):
+        gap_time = list(time_arrived_requests.keys())[arrival_time_id] - list(time_arrived_requests.keys())[arrival_time_id-1] if arrival_time_id != 0 else list(time_arrived_requests.keys())[arrival_time_id]
         # add incoming requests to the queue
         # and get the next node to process --> max operation
         for user_request_id in arrived_user_request_ids:
@@ -210,58 +65,167 @@ async def simulator(args, user_requests):
 
         asyncio.create_task(full_queue.incremental_update(), name=f'incremental_update_task_{arrival_time_id}')
 
-        if config.ongoing_request is None:
-            # fetch the next node
-            config.ongoing_request = full_queue.fetch_next_node()
+        await asyncio.sleep(gap_time/10)
+
+async def GPU_execute(MaxHeap_Memory, full_queue):
+    def one_execute_iteration(ongoing_requests):
+        prefilling_requests = []
+        # check whether there's prefilling requests in the batch
+        for user_request in ongoing_requests:
+            if user_request.predicted_remaining_computation_time[0] > 0:
+                prefilling_requests.append(user_request)
+
+        MaxHeap_Memory.update_ongoing_requests(ongoing_requests)
+
+        # allocate memory for each request (token-wise)
+        preempted_requests_memory_killed = []
+        deallocated_requests = []
+        if prefilling_requests != []:
+            # allocate memory for prefilling [user_request.prompt_length tokens]
+            for user_request in prefilling_requests:
+                res = MaxHeap_Memory.allocate_memory_for(user_request, user_request.prompt_length)
+                preempted_requests_memory_killed.extend(res['preempted_requests'])
+                deallocated_requests.extend(res['deallocated_requests'])
         else:
-            # fetch the highest ordered request in the newly incoming batch of requests
-            next_request_in_batch = full_queue.fetch_next_node()
+            # allocate memory for decoding [1 token]
+            for user_request in ongoing_requests:
+                res = MaxHeap_Memory.allocate_memory_for(user_request, 1)
+                preempted_requests_memory_killed.extend(res['preempted_requests'])
+                deallocated_requests.extend(res['deallocated_requests'])
 
-            # preempt the ongoing request by the new request if necessary
-            if trigger_preemption(args, config.ongoing_request, next_request_in_batch):
-                print(bcolors.WARNING + f"Preempting {config.ongoing_request.user_request_id} by {next_request_in_batch.user_request_id}" + bcolors.ENDC)
-                
-                next_request_in_batch.print_out_features()
+        # remove preempted requests from prefilling_requests and ongoing_requests
+        prefilling_requests = [user_request for user_request in prefilling_requests if user_request.user_request_id not in [r.user_request_id for r in preempted_requests_memory_killed]]
+        ongoing_requests = [user_request for user_request in ongoing_requests if user_request.user_request_id not in [r.user_request_id for r in preempted_requests_memory_killed]]
 
-                # add loading_cache/recomputation time to total remaining time of the preempted request
-                ongoing_request_cache_save_time = update_cache_loading_or_recomputation_time_and_extra_saving_time(args, config.ongoing_request)
+        # update and push deallocated_requests back to full_queue
+        for deallocated_request in deallocated_requests:
+            full_queue.two_dim_priority_queue.push(deallocated_request, deallocated_request.predicted_priority, deallocated_request.predicted_remaining_computation_time[-1] + deallocated_request.prefill_cache_loading_time + deallocated_request.decoding_cache_loading_time)
 
-                # put the preempted request back to the queue
-                full_queue.two_dim_priority_queue.push(config.ongoing_request, config.ongoing_request.predicted_priority, config.ongoing_request.predicted_remaining_computation_time[-1] + config.ongoing_request.prefill_cache_loading_time + config.ongoing_request.decoding_cache_loading_time)
+        if prefilling_requests != []:
+            # the whole prefilling is one iteration
+            iteration_time = max([user_request.remaining_computation_time[0] + user_request.prefill_cache_loading_time for user_request in prefilling_requests])
+            for user_request in prefilling_requests:
+                user_request.update_normal_prefilling_iteration()
+            for user_request in ongoing_requests:
+                user_request.update_waiting_time(iteration_time)
+        else:
+            # one decoded token is one iteration
+            iteration_time = max([compute_output_time(args, user_request.prompt_length + max(user_request.CPU_decoding_loaded_cache), 1)+user_request.decoding_cache_loading_time for user_request in ongoing_requests])
+            for user_request in ongoing_requests:
+                user_request.update_normal_decoding_iteration()
+            for user_request in ongoing_requests:
+                user_request.update_waiting_time(iteration_time)
 
-                # next time, we need to reload the cache
-                config.ongoing_request.prefill_cache_loaded_proportion = 0
-                config.ongoing_request.decoding_cache_loaded_length = 0
+        # update MaxHeap_Memory with updated remaining computation time for ongoing_requests
+        MaxHeap_Memory.reconstruct_heap(ongoing_requests)
 
-                # the preempting request is now the ongoing request
-                config.ongoing_request = next_request_in_batch
-                # we also consider the situation where the previous saving time is not 0
-                # meaning that the request before the preempted request has not finished saving the cache
-                # in which case ongoing_request_cache_save_time = 0, but we need to add the previous saving time to the current request
-                config.ongoing_request.previous_save_time = ongoing_request_cache_save_time + config.ongoing_request.previous_save_time
-                
-                full_queue.visualize()
-            else:
-                print(bcolors.WARNING + "No preemption" + bcolors.ENDC)
-                # add next_request_in_batch in queue right after the root
-                # !!! bug fixed here!!!!!!!!!!!!!
-                full_queue.two_dim_priority_queue.push(next_request_in_batch, next_request_in_batch.predicted_priority, next_request_in_batch.predicted_remaining_computation_time[-1] + next_request_in_batch.prefill_cache_loading_time + next_request_in_batch.decoding_cache_loading_time)
+        ongoing_requests = [user_request for user_request in ongoing_requests if user_request.remaining_computation_time[-1] > 0]
+        return iteration_time, ongoing_requests
+
+    def call_scheduler(args, full_queue, ongoing_requests):
+        next_node = full_queue.fetch_next_node()
+        ######### find whether we should do prefilling or decoding in preemption #########
+        ######################################################
+        # compare next_node & current highest_priority node
+        if next_node.predicted_priority < config.ongoing_requests[0].predicted_priority or (next_node.predicted_priority == config.ongoing_requests[0].predicted_priority and next_node.predicted_remaining_computation_time[-1] < config.ongoing_requests[0].predicted_remaining_computation_time[-1]):
+            node_to_align = next_node
+        else:
+            node_to_align = config.ongoing_requests[0]
+        require_decode = False
+        max_prefilling_time = float('inf')
+        if node_to_align.predicted_remaining_computation_time[0] == 0:
+            require_decode = True 
+        else:
+            max_prefilling_time = node_to_align.predicted_remaining_computation_time[0]
+        full_queue.push(next_node, next_node.predicted_priority, next_node.predicted_remaining_computation_time[-1] + next_node.prefill_cache_loading_time + next_node.decoding_cache_loading_time)
+        ######################################################
         
-        if arrival_time_id < len(arrival_intervals) - 1:
-            running_time = round_2(arrival_intervals[arrival_time_id+1] - arrival_intervals[arrival_time_id])
-            asyncio.create_task(GPU_execute(arrival_time_id, arrival_intervals, full_queue, config.ongoing_request, config.record_requests), name=f'GPU_execute_task_{config.ongoing_request.user_request_id}')
-            await asyncio.sleep(running_time/10)
-        else:
-            await GPU_execute(arrival_time_id, arrival_intervals, full_queue, config.ongoing_request, config.record_requests)
+        # fetch the highest ordered request in the newly incoming batch of requests
+        # return a sorted list
+        next_batch = full_queue.fetch_next_k_nodes(args.batch_size, require_decode=require_decode, max_prefilling_time=max_prefilling_time)
 
-    save_info, file_name = compute_average_waiting_time(args, config.record_requests, user_request_waiting_time_from_predictor)
+        # for each pair of user requests
+        # user_request_1 is the ongoing request
+        # user_request_2 is the next request that can preempt user_request_1
+
+        def merge(list1, list2):
+            # merge two list of user requests based on (predicted_priority, predicted_remaining_computation_time)
+            pq = []
+            i, j = 0, 0
+            while i < len(list1) and j < len(list2):
+                if list1[i].predicted_priority < list2[j].predicted_priority or (list1[i].predicted_priority == list2[j].predicted_priority and list1[i].predicted_remaining_computation_time[-1] < list2[j].predicted_remaining_computation_time[-1]):
+                    pq.append(list1[i])
+                    i += 1
+                else:
+                    pq.append(list2[j])
+                    j += 1
+            if i < len(list1):
+                pq += list1[i:]
+            if j < len(list2):
+                pq += list2[j:]
+            return pq
+
+        merged_queue = merge(ongoing_requests, next_batch)
+        top_batch_size_requests = merged_queue[:args.batch_size]
+        preempted_requests = [ongoing_requests[i] for i in range(len(ongoing_requests)) if ongoing_requests[i].user_request_id not in [r.user_request_id for r in top_batch_size_requests]]
+        push_back_requests = [merged_queue[i] for i in range(len(merged_queue)) if merged_queue[i].user_request_id not in [r.user_request_id for r in top_batch_size_requests]]
+
+        return top_batch_size_requests, preempted_requests, push_back_requests
     
-    return save_info, file_name
+    # when there's super long gap between next incoming batch of requests
+    # we wait maximum 20 seconds
+    # if no requests coming, we stop the simulation
+    async def detect_requests_coming(full_queue):
+        max_wait_in_simulation = 2000
+        n = 0
+        while len(full_queue.two_dim_priority_queue) == 0 and len(config.ongoing_requests) == 0 and len(full_queue.unsorted_nodes) == 0:
+            await asyncio.sleep(0.01)
+            n += 1
+            if n > max_wait_in_simulation:
+                return False
+        return True
+
+    has_requests = True
+    while has_requests:
+        if len(config.ongoing_requests) == 0:
+            config.ongoing_requests = full_queue.fetch_next_k_nodes(args.batch_size, require_decode=False, max_prefilling_time=float('inf'))
+        print('ongoing_requests:', [r.user_request_id for r in config.ongoing_requests])
+        while len(full_queue.two_dim_priority_queue) != 0 or len(config.ongoing_requests) != 0 or len(full_queue.unsorted_nodes) != 0:
+            # run one iteration
+            iteration_time, config.ongoing_requests = one_execute_iteration(config.ongoing_requests)
+            # check scheduler
+            config.ongoing_requests, preempted_requests, push_back_requests = call_scheduler(args, full_queue, config.ongoing_requests)
+            # update remaining computation time
+            for request in config.ongoing_requests:
+                request.update_computation_time_normal_run(iteration_time)
+                # just for record to compute final result
+                config.record_requests[request.user_request_id] = request
+            # update waiting time for all requests
+            full_queue.update_waiting_time(iteration_time)
+
+            # put back the push back requests
+            for user_request in push_back_requests:
+                full_queue.two_dim_priority_queue.push(user_request, user_request.predicted_priority, user_request.predicted_remaining_computation_time[-1] + user_request.prefill_cache_loading_time + user_request.decoding_cache_loading_time)
+            completed_requests = [r for r in config.ongoing_requests if r.remaining_computation_time[-1] == 0]
+            #!! delete completed requests' memory block
+            # Dujian
+            for user_request in completed_requests:
+                MaxHeap_Memory.deallocate_memory_for(user_request)
+
+            await asyncio.sleep(iteration_time/10)
+        
+        has_requests = await detect_requests_coming(full_queue)
+
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--seed', type=int, default=0)
     parser.add_argument('--gap_num', type=int, default=100)
+    parser.add_argument('--GPU_memory', type=float, default=40)
+    parser.add_argument('--GPU_memory_utilization', type=float, default=0.8)
+    parser.add_argument('--activation_memory_percentage', type=float, default=0.05)
+    parser.add_argument('--block_size', type=int, default=32)
+    parser.add_argument('--batch_size', type=int, default=16)
 
     parser.add_argument('--priority_error_distance', type=float, default=0)
     parser.add_argument('--priority_error_rate', type=float, default=0)
@@ -315,7 +279,10 @@ if __name__ == '__main__':
 
     random.seed(args.seed)
     np.random.seed(args.seed)
-
+    
+    args.GPU_KV_cache, args.KV_block_number = compute_GPU_KV_storage_size(args)
+    args.MaxHeap_Memory = MaxHeap_Memory_Class(args)
+    
     # for each time interval, we have a random number of user requests coming
     num_of_user_requests_coming = [random.randint(0, args.max_concurrent_user_requests) for _ in range(args.gap_num)]
 

@@ -1,8 +1,7 @@
 import heapq
 import math, sys
 from heapq import heappush, heappop
-from semantic_predictor import update_cache_loading_or_recomputation_time_and_extra_saving_time
-
+from utils import bcolors, round_2
 
 class TwoDimensionalPriorityQueue:
     def __init__(self):
@@ -73,7 +72,7 @@ class MaxHeap_Memory_Class:
             return self.request_id2blocks[request_id] * self.block_size - self.request_id2tokens[request_id]
         return 0
 
-    def allocate_memory_for(self, user_request, requested_tokens):
+    def allocate_memory_for(self, user_request, requested_tokens, full_queue):
         """
 
         :param user_request:
@@ -82,8 +81,6 @@ class MaxHeap_Memory_Class:
         """
         res = {'preempted_requests': [], 'deallocated_requests': []}    # {{preempted_request_id: list of request object}, {deallocated_request_id: list of request object}}
         request_id = user_request.user_request_id
-        priority = user_request.predicted_priority
-        remaining_time = user_request.predicted_remaining_computation_time[-1] + user_request.prefill_cache_loading_time + user_request.decoding_cache_loading_time
         if request_id not in self.request_id2blocks:
             self.request_id2blocks[request_id] = 0
             self.request_id2tokens[request_id] = 0
@@ -94,11 +91,12 @@ class MaxHeap_Memory_Class:
             return res
 
         requested_blocks = math.ceil((requested_tokens - self.request_id2tokens[request_id]) / self.block_size)
-
+        
         if self.storage_left() >= requested_blocks:
             self.request_id2blocks[request_id] += requested_blocks
             self.request_id2tokens[request_id] += requested_tokens
             self.used_blocks += requested_blocks
+
             return res
         else:
             requested_blocks_remaining = requested_blocks
@@ -140,10 +138,9 @@ class MaxHeap_Memory_Class:
                     self.request_id2blocks[lowest_priority_request_id] -= requested_blocks_remaining
                     self.request_id2tokens[lowest_priority_request_id] = self.request_id2blocks[lowest_priority_request_id] * self.block_size
 
-                    #TODO: update remaining time for the lowest_priority_request
-                    update_cache_loading_or_recomputation_time_and_extra_saving_time(lowest_priority_request)
-                    remaining_time = lowest_priority_request.predicted_remaining_computation_time[-1] + lowest_priority_request.prefill_cache_loading_time + lowest_priority_request.decoding_cache_loading_time
-                    self.push(lowest_priority_request, priority, remaining_time)
+                    user_request.swap_or_delete_update(remaining_tokens_on_GPU=self.request_id2tokens[user_request.user_request_id])
+                    remaining_time = user_request.predicted_remaining_computation_time[-1] + user_request.prefill_cache_loading_time + user_request.decoding_cache_loading_time
+                    self.push(lowest_priority_request, lowest_priority_request.priority, remaining_time)
 
                     res['deallocated_requests'].append(lowest_priority_request)
 
@@ -165,7 +162,34 @@ class MaxHeap_Memory_Class:
             self.used_blocks -= self.request_id2blocks[request_id]
             # heap deletion is deferred to the future allocation
 
+    def visualize(self):
+        # visualize a heap 
+        def print_heap_tree(heap, index=0, indent="", branch="Root: "):
+            """
+            Recursively prints a heap as a tree.
+            
+            :param heap: List representing the heap
+            :param index: Current index within 'heap'
+            :param indent: Current indentation (used internally)
+            :param branch: Label of the current branch (Root, L---, R---)
+            """
+            if index < len(heap):
+                # Print the current node
+                print(indent + branch + str((heap[index][2].user_request_id, heap[index][2].predicted_priority, heap[index][2].predicted_remaining_computation_time[-1] + heap[index][2].prefill_cache_loading_time + heap[index][2].decoding_cache_loading_time)))
+                
+                # Prepare for children
+                left_index = 2 * index + 1
+                right_index = 2 * index + 2
+                
+                # Increase indentation for children
+                child_indent = indent + "    "
+                
+                # Recursively print left and right subtrees
+                print_heap_tree(heap, left_index, child_indent, "L--- ")
+                print_heap_tree(heap, right_index, child_indent, "R--- ")
 
+        print(bcolors.OKCYAN + "Memory Management for KV Cache (MaxHeap):" + bcolors.ENDC)
+        print_heap_tree(self.heap)
 
 
 

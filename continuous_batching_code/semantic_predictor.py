@@ -237,4 +237,3 @@ if __name__ == '__main__':
     simulated_predicted_output_bucket = simulated_output_length_bucket_predictor(args, list(range(args.user_request_num)), oracle_predicted_output_bucket)
     print(simulated_predicted_priority)
     print(simulated_predicted_output_bucket)
-

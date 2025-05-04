@@ -69,34 +69,36 @@ def compute_waiting_time_with_priority(record_requests, user_request_waiting_tim
 
 def compute_average_waiting_time(args, record_requests, user_request_waiting_time_from_predictor):
     save_info, _ = compute_waiting_time_with_priority(record_requests, user_request_waiting_time_from_predictor)
-    
-    if args.user_request_gap < 1 or args.user_request_gap == 1:
+    priority_predictor_latency = round(args.priority_predictor_latency/(args.priority_predictor_batching_size*0.1), 4)
+
+    if args.experiment_name == 'gap':
         n = 0
         file_name = f'simulation/gap/average_waiting_time_with_priority_gap{args.user_request_gap}_maxcon{args.max_concurrent_user_requests}_{n}.json'
         while os.path.exists(file_name):
             n += 1
             file_name = f'simulation/gap/average_waiting_time_with_priority_gap{args.user_request_gap}_maxcon{args.max_concurrent_user_requests}_{n}.json'
 
-    elif args.priority_error_rate >= 0.1:
+    elif args.experiment_name == 'priority':
         n = 0
         file_name = f'simulation/priority/average_waiting_time_with_priority_priorityrate{args.priority_error_rate}_dis{args.priority_error_distance}_{n}.json'
         while os.path.exists(file_name):
             n += 1
             file_name = f'simulation/priority/average_waiting_time_with_priority_priorityrate{args.priority_error_rate}_dis{args.priority_error_distance}_{n}.json'
 
-    elif args.output_length_error_rate >= 0.1:
+    elif args.experiment_name == 'length':
         n = 0
         file_name = f'simulation/length/average_waiting_time_with_priority_lengthrate{args.output_length_error_rate}_dis{args.output_length_error_distance}_{n}.json'
         while os.path.exists(file_name):
             n += 1
             file_name = f'simulation/length/average_waiting_time_with_priority_lengthrate{args.output_length_error_rate}_dis{args.output_length_error_distance}_{n}.json'
-
     else:
+        assert args.experiment_name == 'latency'
         n = 0
-        file_name = f'simulation/latency/average_waiting_time_with_priority_predictorbatch{args.priority_predictor_batching_size}_latency{args.priority_predictor_latency}_{args.processing_mode}_{n}.json'
+        file_name = f'simulation/latency/average_waiting_time_with_priority_predictorbatch{args.priority_predictor_batching_size}_latency{priority_predictor_latency}_{args.processing_mode}_{n}.json'
         while os.path.exists(file_name):
             n += 1
-            file_name = f'simulation/latency/average_waiting_time_with_priority_predictorbatch{args.priority_predictor_batching_size}_latency{args.priority_predictor_latency}_{args.processing_mode}_{n}.json'
-    
+            file_name = f'simulation/latency/average_waiting_time_with_priority_predictorbatch{args.priority_predictor_batching_size}_latency{priority_predictor_latency}_{args.processing_mode}_{n}.json'
+        
     
     return save_info, file_name
+

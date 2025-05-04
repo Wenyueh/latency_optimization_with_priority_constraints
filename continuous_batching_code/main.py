@@ -133,15 +133,6 @@ async def GPU_execute(MaxHeap_Memory, full_queue):
             for user_request in full_queue.return_all_requests():
                 user_request.update_waiting_time(iteration_time)
 
-        # # update remaining computation time for all requests on MinHeap
-        # for user_request in deallocated_requests:
-        #     # remove the lowest_priority_request from full_queue minheap
-        #     full_queue.two_dim_priority_queue.delete(user_request)
-        #     # update remaining time for the lowest_priority_request and reinsert it to the maxheap
-        #     user_request.swap_or_delete_update(remaining_tokens_on_GPU=MaxHeap_Memory.request_id2tokens[user_request.user_request_id])
-        #     remaining_time = user_request.predicted_remaining_computation_time[-1] + user_request.prefill_cache_loading_time + user_request.decoding_cache_loading_time
-        #     full_queue.two_dim_priority_queue.push(user_request, user_request.predicted_priority, remaining_time)
-
         # update MaxHeap_Memory with updated remaining computation time for ongoing_requests
         MaxHeap_Memory.reconstruct_heap(ongoing_requests)
 
@@ -274,7 +265,7 @@ async def GPU_execute(MaxHeap_Memory, full_queue):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--seed', type=int, default=0)
-    parser.add_argument('--gap_num', type=int, default=100)
+    parser.add_argument('--gap_num', type=int, default=200)
     parser.add_argument('--GPU_memory_utilization', type=float, default=0.8)
     parser.add_argument('--activation_memory_percentage', type=float, default=0.05)
     parser.add_argument('--block_size', type=int, default=32)
@@ -298,10 +289,15 @@ if __name__ == '__main__':
     parser.add_argument('--max_prompt_length', type=int, default=500)
     parser.add_argument('--max_output_length', type=int, default=500)
 
-    parser.add_argument('--setting', type=str, default='A100_7B_', help='A100_4B, A100_7B, A5000_4B, A5000_7B')
+    parser.add_argument('--experiment_name', type=str, default='gap', help='gap, priority, length, latency')
+
+    parser.add_argument('--setting', type=str, default='A100_4B', help='A100_4B, A100_7B, A5000_4B, A5000_7B')
     args = parser.parse_args()
 
-    if args.setting == 'A5000_4B_':
+    args.priority_predictor_latency *= args.priority_predictor_batching_size * 0.1
+    args.length_predictor_latency *= args.length_predictor_batching_size * 0.1
+
+    if args.setting == 'A5000_4B':
         args.token_decoding_speed_coefficient1 = 2.86938135e-06
         args.token_decoding_speed_coefficient2 = 3.00834536e-02
         args.prefill_speed_coefficient1 = 1.58625005e-09
@@ -309,7 +305,7 @@ if __name__ == '__main__':
         args.cache_loading_speed = 0.0003
         args.cache_saving_speed = 0.0003
         args.GPU_memory = 24
-    elif args.setting == 'A100_4B_':
+    elif args.setting == 'A100_4B':
         args.token_decoding_speed_coefficient1 = 5.91298857e-09
         args.token_decoding_speed_coefficient2 = 1.195828e-02
         args.prefill_speed_coefficient1 = 1.46584975e-09
@@ -317,15 +313,15 @@ if __name__ == '__main__':
         args.cache_loading_speed = 0.0001
         args.cache_saving_speed = 0.0001
         args.GPU_memory = 40
-    elif args.setting == 'A100_7B_':
+    elif args.setting == 'A100_7B':
         args.token_decoding_speed_coefficient1 = 1.34911080e-08
         args.token_decoding_speed_coefficient2 = 1.330198e-02
         args.prefill_speed_coefficient1 = 5.13462572e-07
         args.prefill_speed_coefficient2 = 1.48057167e-04
         args.cache_loading_speed = 0.0001
         args.cache_saving_speed = 0.0001
-        args.GPU_memory = 37.5 #! for testing change only
-    elif args.setting == 'A5000_7B_':
+        args.GPU_memory = 40 #! for testing change only
+    elif args.setting == 'A5000_7B':
         args.token_decoding_speed_coefficient1 = 2.11725653e-06
         args.token_decoding_speed_coefficient2 = 2.72656264e-02
         args.prefill_speed_coefficient1 = 1.85905340e-09
@@ -360,8 +356,10 @@ if __name__ == '__main__':
     # compute total time
     total_waiting_time = sum([v['waiting_time'] for k,v in save_info.items() if k != 'average_waiting_time_with_priority'])
     save_info['total_waiting_time'] = total_waiting_time
-    file_name = args.setting + file_name
+
+    file_name = args.setting + '_' + file_name
     print(file_name)
+    
     # save the information
     with open(file_name, 'w') as f:
         json.dump(save_info, f, indent=4)

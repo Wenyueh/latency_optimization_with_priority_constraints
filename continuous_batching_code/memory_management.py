@@ -70,7 +70,7 @@ class MaxHeap_Memory_Class:
         if request_id not in self.request_id2blocks:
             self.request_id2blocks[request_id] = 0
             self.request_id2tokens[request_id] = 0
-            self.push(user_request, user_request.priority, user_request.predicted_remaining_computation_time[-1] + user_request.prefill_cache_loading_time + user_request.decoding_cache_loading_time)
+            self.push(user_request, user_request.predicted_priority, user_request.predicted_remaining_computation_time[-1] + user_request.prefill_cache_loading_time + user_request.decoding_cache_loading_time)
 
         if self.storage_left() >= requested_blocks:
             self.request_id2blocks[request_id] += requested_blocks
@@ -88,6 +88,7 @@ class MaxHeap_Memory_Class:
                     lowest_priority_request = self.pop()
                 except:
                     print(self.heap)
+                    raise ValueError("Heap is empty, not enough memory for the current request")
 
                 lowest_priority_request_id = lowest_priority_request.user_request_id
                 if lowest_priority_request_id in self.ongoing_request_ids:
@@ -99,11 +100,11 @@ class MaxHeap_Memory_Class:
                     # then we just preempt this request, and we don't need to deallocate any memory
                     assert lowest_priority_request in res['preempted_requests']
                     remaining_time = lowest_priority_request.predicted_remaining_computation_time[-1] + lowest_priority_request.prefill_cache_loading_time + lowest_priority_request.decoding_cache_loading_time
-                    self.push(lowest_priority_request, lowest_priority_request.priority, remaining_time)
+                    self.push(lowest_priority_request, lowest_priority_request.predicted_priority, remaining_time)
 
                     return res
 
-                # lazy deletion of the completed request and the preempted request due to the failed memory allocation
+                # lazy deletion of the completed request and the preempted request due to earlier failed memory allocation
                 if lowest_priority_request_id not in self.request_id2blocks:
                     continue
                 if self.request_id2blocks[lowest_priority_request_id] == 0:
@@ -140,7 +141,7 @@ class MaxHeap_Memory_Class:
                 lowest_priority_request.swap_or_delete_update(remaining_tokens_on_GPU=tokens_remaining, total_tokens_on_cache=total_tokens_on_cache)
                 remaining_time = lowest_priority_request.predicted_remaining_computation_time[-1] + lowest_priority_request.prefill_cache_loading_time + lowest_priority_request.decoding_cache_loading_time
                 if tokens_remaining > 0:
-                    self.push(lowest_priority_request, lowest_priority_request.priority, remaining_time)
+                    self.push(lowest_priority_request, lowest_priority_request.predicted_priority, remaining_time)
 
                 res['deallocated_requests'].append(lowest_priority_request)
 

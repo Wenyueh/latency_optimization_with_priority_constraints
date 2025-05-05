@@ -1,7 +1,7 @@
 import argparse, time, random, config, json
 import numpy as np
 from copy import deepcopy
-from queue_management import Request, PriorityQueue
+from queue_management import Request, PriorityQueue, TwoDimensionalPriorityQueue
 from utils import bcolors, cancel, round_2, compute_average_waiting_time
 from compute_arrival_time_utils import *
 from semantic_predictor import (
@@ -201,7 +201,9 @@ async def simulator(args, user_requests):
     full_queue = PriorityQueue(args)
     config.record_requests = {}
 
+    config.ongoing_request_queue = TwoDimensionalPriorityQueue()
     config.ongoing_request = None
+
     for arrival_time_id, arrived_user_request_ids in enumerate(list(time_arrived_requests.values())):
         # add incoming requests to the queue
         # and get the next node to process --> max operation
@@ -211,15 +213,20 @@ async def simulator(args, user_requests):
 
         asyncio.create_task(full_queue.incremental_update(), name=f'incremental_update_task_{arrival_time_id}')
 
-        if config.ongoing_request is None:
+        # if config.ongoing_request is None:
+        if config.ongoing_request_queue.is_empty():
             # fetch the next node
-            config.ongoing_request = full_queue.fetch_next_node()
+            tmp_next_node = full_queue.fetch_next_node()
+            config.ongoing_request_queue.push(tmp_next_node, -1 * tmp_next_node.predicted_priority, -1 * (tmp_next_node.predicted_remaining_computation_time[-1] + tmp_next_node.prefill_cache_loading_time + tmp_next_node.decoding_cache_loading_time))
         else:
             # fetch the highest ordered request in the newly incoming batch of requests
             next_request_in_batch = full_queue.fetch_next_node()
 
+            config.ongoing_request = config.ongoing_request_queue.peek()
             # preempt the ongoing request by the new request if necessary
             if trigger_preemption(args, config.ongoing_request, next_request_in_batch):
+                config.ongoing_request_queue.pop()
+
                 print(bcolors.WARNING + f"Preempting {config.ongoing_request.user_request_id} by {next_request_in_batch.user_request_id}" + bcolors.ENDC)
                 
                 next_request_in_batch.print_out_features()
@@ -240,15 +247,22 @@ async def simulator(args, user_requests):
                 # meaning that the request before the preempted request has not finished saving the cache
                 # in which case ongoing_request_cache_save_time = 0, but we need to add the previous saving time to the current request
                 config.ongoing_request.previous_save_time = ongoing_request_cache_save_time + config.ongoing_request.previous_save_time
-                
+
+                config.ongoing_request_queue.push(config.ongoing_request, -1 * config.ongoing_request.predicted_priority, -1 * (
+                            config.ongoing_request.predicted_remaining_computation_time[
+                                -1] + config.ongoing_request.prefill_cache_loading_time + config.ongoing_request.decoding_cache_loading_time))
+
+
                 full_queue.visualize()
             else:
                 print(bcolors.WARNING + "No preemption" + bcolors.ENDC)
                 # add next_request_in_batch in queue right after the root
+                # ???
                 full_queue.two_dim_priority_queue.push(next_request_in_batch, config.ongoing_request.predicted_priority, next_request_in_batch.predicted_remaining_computation_time[-1] + next_request_in_batch.prefill_cache_loading_time + config.ongoing_request.decoding_cache_loading_time)
         
         if arrival_time_id < len(arrival_intervals) - 1:
             running_time = round_2(arrival_intervals[arrival_time_id+1] - arrival_intervals[arrival_time_id])
+            # ???
             asyncio.create_task(GPU_execute(arrival_time_id, arrival_intervals, full_queue, config.ongoing_request, config.record_requests), name=f'GPU_execute_task_{config.ongoing_request.user_request_id}')
             await asyncio.sleep(running_time)
         else:

@@ -218,10 +218,8 @@ async def GPU_execute(MaxHeap_Memory, full_queue):
             # merge two list of user requests based on (predicted_priority, predicted_remaining_computation_time)
             if not require_decode:
                 #short_prefilling_ongoing_requests = [request for request in ongoing_requests if request.predicted_remaining_computation_time[0] <= max_prefilling_time]
-                short_prefilling_ongoing_requests = ongoing_requests
-                pq = merge(short_prefilling_ongoing_requests, next_batch)
-                longer_prefilling_requests = [request for request in ongoing_requests if request.predicted_remaining_computation_time[0] > max_prefilling_time]
-                return pq, longer_prefilling_requests
+                pq = merge(ongoing_requests, next_batch)
+                return pq, []
             else:
                 decoding_ongoing_requests = [request for request in ongoing_requests if request.predicted_remaining_computation_time[0] <= 0]
                 pq = merge(decoding_ongoing_requests, next_batch)

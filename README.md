@@ -74,6 +74,11 @@ Characteristics:
 - Ignores semantic urgency, potentially delaying critical requests
 - Requires accurate output length prediction for optimal performance
 
+
+### Experiment Result Replication
+To replicate the experiment results, run commands in experiment_scripts
+
+
 ## Priority Job First Scheduling
 This algorithm schedules requests based solely on their semantic priority level, ignoring completion time estimates. Requests are processed in strict priority order (0 → 4), with FIFO ordering within each priority class.
 

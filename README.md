@@ -58,6 +58,9 @@ python main.py --user_request_gap 0.1 --max_concurrent_user_requests 3 --setting
 ```
 The simulation tracks key metrics including per-priority-level latency, overall system throughput, and cache utilization efficiency under various load conditions.
 
+### Experiment Result Replication
+To replicate the experiment results, run commands in experiment_scripts
+
 
 ## Shortest Job First (SJF) Scheduling
 This baseline algorithm schedules requests purely based on predicted remaining computation time, without considering semantic importance. It implements the classic SJF policy adapted for LLM serving, where "job length" corresponds to the estimated number of tokens yet to be generated.
@@ -73,10 +76,6 @@ Characteristics:
 - Can lead to starvation of long requests under sustained high load
 - Ignores semantic urgency, potentially delaying critical requests
 - Requires accurate output length prediction for optimal performance
-
-
-### Experiment Result Replication
-To replicate the experiment results, run commands in experiment_scripts
 
 
 ## Priority Job First Scheduling
